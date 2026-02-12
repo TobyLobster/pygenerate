@@ -9,6 +9,9 @@ import re               # for parsing INF files
 import dfsimage                 # for reading BBC disk images
 import bbc_basic_detokenizer    # For identifying and detokenising BASIC
 
+BBC_POUND = "`"
+UNICODE_POUND = bytes((0xa3, )).decode("iso8859-1")
+
 script_dir = os.path.dirname(os.path.realpath(__file__))
 
 class BBCMicroFile:
@@ -90,6 +93,7 @@ def convert_to_host_filename(bbc_filename):
     filename = filename.replace("*"     , "#star")
     filename = filename.replace("|"     , "#bar")
     filename = filename.replace("\""    , "#quote")
+    filename = filename.replace(BBC_POUND, UNICODE_POUND)
     return filename
 
 # Convert back a host filename previously converted from a BBC Micro FS filename
@@ -103,7 +107,12 @@ def convert_to_bbc_filename(host_filename):
     filename = filename.replace("#star"         , "*")
     filename = filename.replace("#bar"          , "|")
     filename = filename.replace("#quote"        , "\"")
+    filename = filename.replace(UNICODE_POUND, BBC_POUND)
     return filename
+
+def disk_metadata(disk_path: str):
+    with dfsimage.Image(disk_path) as img:
+        return ([(side.title, side.opt) for side in img.sides])
 
 def extract_manually(disk_path: str, output_dir: str):
     """Extract files manually with full control."""
@@ -180,11 +189,13 @@ def is_totally_printable(data: bytes) -> bool:
     return printable_count == len(data)
 
 def show_usage():
-    print("This utility takes either a BBC Micro SSD (or DSD) file, or a directory of loose BBC Micro files (possibly with associated .INF files), and:")
-    print("    (a) creates editable source files based on the binary files (e.g. assembly language files for code, text files for BASIC),")
+    print("This utility reads BBC Micro files (from SSD, DSD, or a directory of files perhaps with associated .INF files), and:")
+    print("    (a) creates editable source files based on the file contents (e.g. assembly language files for code, text files for BASIC),")
     print("    (b) assembles them into new binaries (identical to the original binaries) and")
-    print("    (c) creates an SSD or DSD from the results.")
-    print("This utility requires 'py8dis' (https://github.com/ZornsLemma/py8dis) to be visible to Python, e.g. in PYTHONPATH or in the same directory as this python script.")
+    print("    (c) recreates an SSD or DSD from the results.")
+    print("This utility requires:")
+    print("    'py8dis' (https://github.com/ZornsLemma/py8dis) to be visible to Python, e.g. in PYTHONPATH or in the same directory as this python script.")
+    print("    'beebasm' or 'acme' assembler (https://github.com/stardot/beebasm/ or https://sourceforge.net/projects/acme-crossass/)")
     print("")
     print("USAGE: pygenerate <filepath to ssd> {--acme} {--beebasm}")
 
@@ -321,6 +332,8 @@ def copy_text_to_bbc(source_filepath, destination_filepath):
     with open(destination_filepath, "wb") as f:
         f.write(content.replace(os.linesep.encode(), b'\\x0d'))
 
+def add_file(image, input_file, dfs, load_addr, exec_addr, locked=True):
+    image.import_files(os_files=input_file, dfs_names=dfs, ignore_access=True, inf_mode=dfsimage.InfMode.NEVER, load_addr=0x00000000,  exec_addr=0x00000000, locked=True, replace=True)
 
 # Make build/disc directory
 os.makedirs(os.path.join(script_dir, "build", "disc"), exist_ok=True)
@@ -422,8 +435,19 @@ py_dir = os.path.dirname(os.path.abspath(__file__))
     # Create disc image
     build_script += f'\n# Create {config.extension}\n'
     build_script += f'with dfsimage.Image.create("{os.path.splitext(os.path.basename(config.ssd_filepath))[0]}_new.ssd") as image:\n'
+
+    # Add title and opt to each side
+    side_index = 0
+    sides_metadata = disk_metadata(config.ssd_filepath)
+    for side in sides_metadata:
+        build_script += f"    image.sides[{side_index}].title('{side[0]}')\n"
+        build_script += f"    image.sides[{side_index}].opt({side[1]})\n"
+        side_index += 1
+
+    # Add files
     for f in files_to_process:
-        build_script += f"    image.import_files(os_files=f\"{{os.path.join(script_dir, 'build', 'disc', '{os.path.basename(f.host_filepath)}')}}\", dfs_names='{f.bbc_filepath}', ignore_access=True, inf_mode=dfsimage.InfMode.NEVER, load_addr=0x{f.load_address:08x},  exec_addr=0x{f.exec_address:08x}, locked={f.locked}, replace=True)\n"
+        #build_script += f"    image.import_files(os_files=f\"{{os.path.join(script_dir, 'build', 'disc', '{os.path.basename(f.host_filepath)}')}}\", dfs_names='{f.bbc_filepath}', ignore_access=True, inf_mode=dfsimage.InfMode.NEVER, load_addr=0x{f.load_address:08x},  exec_addr=0x{f.exec_address:08x}, locked={f.locked}, replace=True)\n"
+        build_script += f"    add_file(image, os.path.join(script_dir, 'build', 'disc', '{os.path.basename(f.host_filepath)}'), '{f.bbc_filepath}', load_addr=0x{f.load_address:08x},  exec_addr=0x{f.exec_address:08x}, locked={f.locked})\n"
 
     # Copy dfsimage
     shutil.copytree(os.path.join(script_dir, "dfsimage"), os.path.join(config.destination_folder, "dfsimage"), dirs_exist_ok=True)
