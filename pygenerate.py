@@ -15,7 +15,7 @@ UNICODE_POUND = bytes((0xa3, )).decode("iso8859-1")
 script_dir = os.path.dirname(os.path.realpath(__file__))
 
 class BBCMicroFile:
-    def __init__(self, host_filepath="", bbc_filepath = "", load_address=0, exec_address=0, locked=False):
+    def __init__(self, host_filepath="", bbc_filepath="", load_address=0, exec_address=0, locked=False):
         self.host_filepath = host_filepath  # Host system filepath
         self.bbc_filepath  = bbc_filepath   # BBC Micro DFS filepath
         self.load_address = load_address    # Load address
@@ -27,7 +27,7 @@ class BBCMicroFile:
         self.source_filepath = None
 
 class Config:
-    def __init__(self, ssd_filepath="", loose_folder = "", destination_folder="", extension="", verbose=False):
+    def __init__(self):
         self.ssd_filepath        = ""            # The filepath to the BBC Micro disk image (SSD / DSD)
         self.loose_folder        = ""            # The folder where the loose BBC Micro files are to be found
         self.destination_folder  = ""            # Destination folder
@@ -37,7 +37,7 @@ class Config:
 
 config = Config()
 
-def exit(code, message):
+def exit_with_message(code, message):
     if code != 0:
         print("ERROR: " + message + " (exit code " + str(code) + ")")
     sys.exit(code)
@@ -53,9 +53,15 @@ def safe_copy(source, destination):
     try:
         shutil.copy(source, destination)
     except FileNotFoundError:
-        exit(-1, "Could not find file '" + source + "' to copy to '" + destination + "'")
-    except:
-        exit(-2, "Could not copy file '" + source + "' to '" + destination + "'")
+        exit_with_message(-1, f"Could not find file '{source}' to copy to '{destination}'")
+    except PermissionError:
+        exit_with_message(-2, f"Permission denied when trying to access '{source}' or write to '{destination}'.")
+    except IsADirectoryError:
+        exit_with_message(-3, f"The source '{source}' is a directory, not a file.")
+    except OSError as e:
+        exit_with_message(-4, f"An OS error occurred: {e.strerror}.")
+    except TypeError:
+        exit_with_message(-5, f"Invalid type for source or destination path.")
 
 # Execute a subprocess, returning the stdout
 def run(args, error_message, cwd=None):
@@ -65,8 +71,7 @@ def run(args, error_message, cwd=None):
     if p.returncode != 0:
         print(args)
         print(p.stderr.decode())
-        print(error_message)
-        exit(p.returncode)
+        exit_with_message(p.returncode, error_message)
     return p.stdout
 
 # Make a directory
@@ -174,7 +179,7 @@ def is_disassembly(file: dfsimage.Entry, content: bytes) -> bool:
         return False
     return True
 
-def is_mostly_printable(data: bytes, threshold: float = 0.95) -> bool:
+def is_mostly_printable(data: bytes, threshold: float=0.95) -> bool:
     """Check if at least threshold of bytes are printable ASCII or carriage returns."""
     if not data:
         return True
@@ -202,7 +207,7 @@ def show_usage():
 def main(args):
     if len(args) == 0:
         show_usage()
-        exit(0, "")
+        exit_with_message(0, "")
 
     # Parse arguments
     for i in range(0, len(args)):
@@ -217,7 +222,7 @@ def main(args):
             config.destination_folder, config.extension = os.path.splitext(os.path.basename(config.ssd_filepath))
         elif args[i].startswith("-"):
             show_usage()
-            exit(1, f"Unknown option {args[i]}")
+            exit_with_message(1, f"Unknown option {args[i]}")
         else:
             config.loose_folder = make_absolute_filepath(args[i])
             config.destination_folder, config.extension = os.path.splitext(os.path.basename(config.loose_folder))
@@ -440,8 +445,8 @@ py_dir = os.path.dirname(os.path.abspath(__file__))
     side_index = 0
     sides_metadata = disk_metadata(config.ssd_filepath)
     for side in sides_metadata:
-        build_script += f"    image.sides[{side_index}].title('{side[0]}')\n"
-        build_script += f"    image.sides[{side_index}].opt({side[1]})\n"
+        build_script += f"    image.sides[{side_index}].title = '{side[0]}'\n"
+        build_script += f"    image.sides[{side_index}].opt = {side[1]}\n"
         side_index += 1
 
     # Add files
