@@ -23,7 +23,6 @@ class BBCMicroFile:
         self.length = None
         self.source_filepath = None
 
-
 class Config:
     def __init__(self, ssd_filepath="", loose_folder = "", destination_folder="", extension="", verbose=False):
         self.ssd_filepath        = ""            # The filepath to the BBC Micro disk image (SSD / DSD)
@@ -63,7 +62,8 @@ def run(args, error_message, cwd=None):
     if p.returncode != 0:
         print(args)
         print(p.stderr.decode())
-        exit(p.returncode, error_message)
+        print(error_message)
+        exit(p.returncode)
     return p.stdout
 
 # Make a directory
@@ -130,7 +130,7 @@ def extract_manually(disk_path: str, output_dir: str):
                     locked = "L"
                 else:
                     locked = ""
-                inf = f"{entry.fullname} {entry.load_address:08X} {entry.exec_address:08X} {locked}"
+                inf = f"{entry.fullname:<12} {entry.load_address:08X} {entry.exec_address:08X} {locked}"
                 inf_path = os.path.join(side_dir, name + ".inf")
                 with open(inf_path, 'w') as f:
                     f.write(inf)
@@ -166,58 +166,47 @@ def is_disassembly(file: dfsimage.Entry, content: bytes) -> bool:
     return True
 
 def is_mostly_printable(data: bytes, threshold: float = 0.95) -> bool:
-    """Check if at least threshold of bytes are printable ASCII or newlines."""
+    """Check if at least threshold of bytes are printable ASCII or carriage returns."""
     if not data:
         return True
-    printable_count = sum(1 for b in data if 32 <= b <= 126 or b in (10, 13))
+    printable_count = sum(1 for b in data if 32 <= b <= 126 or (b == 13))
     return printable_count >= (threshold * len(data))
 
 def is_totally_printable(data: bytes) -> bool:
-    """Check if at least threshold of bytes are printable ASCII or newlines."""
+    """Check if at least threshold of bytes are printable ASCII or carriage returns."""
     if not data:
         return True
-    printable_count = sum(1 for b in data if 32 <= b <= 126 or b in (10, 13))
+    printable_count = sum(1 for b in data if 32 <= b <= 126 or (b == 13))
     return printable_count == len(data)
 
-def disassemble(python_filename, asm_filename):
-    """Run a python control script to create Beebasm or Acme assembly"""
-
-    # Get paths
-    path, ext = os.path.splitext(asm_filename)
-    assembler_filename = path + "_" + config.assembler + ext
-
-    # Create disassembly
-    args = ["python3", python_filename, "--" + config.assembler, "--output", assembler_filename]
-    run(args, "disassemble failed")
-
-def run(args, error_message, cwd=None):
-    # For debugging...
-    # print(args)
-    p = subprocess.run(args, capture_output=True, cwd=cwd)
-    if p.returncode != 0:
-        print(f"COMMAND: {' '.join(args)}")
-        print(p.stderr.decode())
-        exit(p.returncode, error_message)
-    return p.stdout
+def show_usage():
+    print("This utility takes either a BBC Micro SSD (or DSD) file, or a directory of loose BBC Micro files (possibly with associated .INF files), and:")
+    print("    (a) creates editable source files based on the binary files (e.g. assembly language files for code, text files for BASIC),")
+    print("    (b) assembles them into new binaries (identical to the original binaries) and")
+    print("    (c) creates an SSD or DSD from the results.")
+    print("This utility requires 'py8dis' (https://github.com/ZornsLemma/py8dis) to be visible to Python, e.g. in PYTHONPATH or in the same directory as this python script.")
+    print("")
+    print("USAGE: pygenerate <filepath to ssd> {--acme} {--beebasm}")
 
 def main(args):
     if len(args) == 0:
-        print("This utility takes either a BBC Micro SSD (or DSD) file, or a directory of loose BBC Micro files (possibly with associated .INF files), and:")
-        print("    (a) creates editable source files based on the binary files (e.g. assembly language files for code, text files for BASIC),")
-        print("    (b) assembles them into new binaries (identical to the original binaries) and")
-        print("    (c) creates an SSD or DSD from the results.")
-        print("This utility requires 'py8dis' (https://github.com/ZornsLemma/py8dis) to be visible to Python, e.g. in PYTHONPATH or in the same directory as this python script.")
-        print("")
-        print("USAGE: pygenerate <filepath to ssd>")
+        show_usage()
         exit(0, "")
 
     # Parse arguments
     for i in range(0, len(args)):
-        if args[i] == "-verbose":
+        if args[i] == "--verbose":
             config.verbose = True
+        elif args[i] == "--acme":
+            config.assembler = "acme"
+        elif args[i] == "--beebasm":
+            config.assembler = "beebasm"
         elif args[i].lower().endswith(".ssd") or args[i].lower().endswith(".dsd"):
             config.ssd_filepath = make_absolute_filepath(args[i])
             config.destination_folder, config.extension = os.path.splitext(os.path.basename(config.ssd_filepath))
+        elif args[i].startswith("-"):
+            show_usage()
+            exit(1, f"Unknown option {args[i]}")
         else:
             config.loose_folder = make_absolute_filepath(args[i])
             config.destination_folder, config.extension = os.path.splitext(os.path.basename(config.loose_folder))
@@ -226,11 +215,11 @@ def main(args):
 
     original_directory  = os.path.join(config.destination_folder, "original")
     source_directory    = os.path.join(config.destination_folder, "source")
-    tools_directory     = os.path.join(config.destination_folder, "tools")
+    control_directory   = os.path.join(config.destination_folder, "control")
 
     make_directory(original_directory)
     make_directory(source_directory)
-    make_directory(tools_directory)
+    make_directory(control_directory)
 
     # Extract files from SSD into a list of loose files with .INF files
     if len(config.ssd_filepath) > 0:
@@ -265,12 +254,77 @@ def main(args):
                 bbc_file = BBCMicroFile(bin_file, bbc_filepath = os.path.basename(bin_file))
             files_to_process.append(bbc_file)
 
-    # Start creating a bash script that builds the new files
-    go_script = """# error out if any command fails
-set -e
+    if config.assembler == "acme":
+        assemble = """args = ["acme", "--symbollist", symbols_filepath, "-r", report_filepath, "-o", binary_filepath, asm_filepath]
+    run(args, "assembly failed")"""
+    elif config.assembler == "beebasm":
+        # beebasm -o disk/imogen -i source/imogen.asm -v > build/imogen.lst
 
+        assemble = """args = ["beebasm", "-o", binary_filepath, "-i", asm_filepath, "-v"]
+
+    report = run(args, "assembly failed")
+    with open(report_filepath, "wb") as f:
+        f.write(report)"""
+
+    build_script = f"""#!/usr/bin/env python3
+import os
+import subprocess
+import glob
+import bbc_basic_tokenizer  # For tokenising BASIC programs
+import dfsimage             # for writing BBC disk images
+
+
+# Get the full directory path of this script
+script_dir = os.path.dirname(os.path.realpath(__file__))
+
+# Execute a subprocess, returning the stdout
+def run(args, error_message, cwd=None):
+    p = subprocess.run(args, capture_output=True, cwd=cwd)
+    if p.returncode != 0:
+        print(args)
+        print(p.stderr.decode())
+        print(error_message)
+        exit(p.returncode)
+    return p.stdout
+
+def disassemble(python_filepath, asm_filepath):
+    # Run a python control script to create Beebasm or Acme asm files
+
+    python_filepath = os.path.join(script_dir, "control", python_filepath)
+    asm_filepath = os.path.join(script_dir, "source", asm_filepath)
+
+    # Create assembly files
+    args = ["python3", python_filepath, "--{config.assembler}", "--output", asm_filepath]
+    run(args, "disassemble failed")
+
+def make_inf(binary_filepath, bbc_bin_filename, load_address, exec_address, locked):
+    inf_text = f'{{bbc_bin_filename:<12}} {{load_address:08x}} {{exec_address:08x}} {{locked}}'
+    with open(binary_filepath + ".inf", "w") as text_file:
+        text_file.write(inf_text)
+
+def assemble(asm_filepath, binary_filepath):
+    asm_filepath     = os.path.join(script_dir, "source", asm_filepath)
+    binary_filepath  = os.path.join(script_dir, "build", "disc", binary_filepath)
+    asm_filename     = os.path.splitext(os.path.basename(asm_filepath))[0]
+    symbols_filepath = os.path.join(script_dir, "build", asm_filename + "_symbols.txt")
+    report_filepath  = os.path.join(script_dir, "build", asm_filename + "_report.txt")
+
+    # Assemble
+    {assemble}
+
+def copy_text_to_bbc(source_filepath, destination_filepath):
+    # Read the source file
+    with open(source_filepath, "rb") as f:
+        content = f.read()
+
+    # Write the destination file, replacing the host line terminator with the BBC Micro line terminator (0x0d)
+    with open(destination_filepath, "wb") as f:
+        f.write(content.replace(os.linesep.encode(), b'\\x0d'))
+
+
+# Make build/disc directory
+os.makedirs(os.path.join(script_dir, "build", "disc"), exist_ok=True)
 """
-
 
     # Process each file, creating a control script for each binary we need to deal with
     for file in files_to_process:
@@ -293,15 +347,33 @@ set -e
 
                 if (end_index < file.length):
                     print(f"with {len(content) - end_index} more bytes beyond the end of the BASIC program")
+
+                # Convert to BASIC II format on disc
+                build_script += f'\n# Create BASIC file {file.bbc_filepath}\n'
+                build_script += f'source_filepath = os.path.join(script_dir, "source", "{os.path.basename(file.source_filepath)}")\n'
+                build_script += f'destination_filepath = os.path.join(script_dir, "build", "disc", "{os.path.basename(file.host_filepath)}")\n'
+                build_script += f'with open(source_filepath, "rb") as f:\n'
+                build_script += f'    tokenized_result = bbc_basic_tokenizer.tokenize_file(f, input_file_contains_escaped_chars=True)\n'
+                build_script += f'    with open(destination_filepath, "wb") as file:\n'
+                build_script += f'        file.write(bytearray(tokenized_result))\n'
+                # Create INF for destination file
+                build_script += f'make_inf(destination_filepath, "{file.bbc_filepath}", 0x{file.load_address:08x}, 0x{file.exec_address:08x}, "{"L" if file.locked else ""}")\n'
+
             elif is_totally_printable(content):
-                # Copy current file content into a file in source_directory
+                # Write the current file content into a file in source_directory, with carriage returns converted to the host OS line ending
                 file.source_filepath = os.path.join(source_directory, os.path.basename(file.host_filepath) + ".txt")
                 with open(file.source_filepath, "wb") as f:
-                    f.write(content)
+                    f.write(content.replace(b'\x0d', os.linesep.encode()))
+
+                build_script += f'\n# Create text file {file.bbc_filepath}\n'
+                build_script += f'destination_filepath = os.path.join(script_dir, "build", "disc", "{os.path.basename(file.host_filepath)}")\n'
+                build_script += f'copy_text_to_bbc(os.path.join(script_dir, "source", "{os.path.basename(file.source_filepath)}"), destination_filepath)\n'
+                build_script += f'make_inf(destination_filepath, "{file.bbc_filepath}", 0x{file.load_address:08x}, 0x{file.exec_address:08x}, "{"L" if file.locked else ""}")\n'
+
             else:
                 # Disassemble
                 # Add to python control script that will invoke py8dis to disassemble the file
-                control_script = f"# Control script for disassembling '{config.destination_folder}'\n\n"
+                control_script = f"# Control script for disassembling '{os.path.basename(file.host_filepath)}'\n\n"
                 control_script += """from commands import *
 import acorn
 import os
@@ -320,9 +392,9 @@ py_dir = os.path.dirname(os.path.abspath(__file__))
 """
                 # For tempest: move(0x0a00, 0x1900, 0x4300-0x1900)
 
-                control_filepath = os.path.join(tools_directory, "build.py")
+                control_filepath = os.path.join(control_directory, os.path.basename(file.host_filepath) + ".py")
 
-                host_filepath_relative_to_script = os.path.relpath(file.host_filepath, tools_directory)
+                host_filepath_relative_to_script = os.path.relpath(file.host_filepath, control_directory)
 
                 control_script += f'# FILE {file.bbc_filepath}\n'
                 control_script += f'load(0x{file.load_address:04x}, os.path.join(py_dir, "{host_filepath_relative_to_script}"), "6502")\n'
@@ -336,23 +408,30 @@ py_dir = os.path.dirname(os.path.abspath(__file__))
                 with open(control_filepath, "w") as f:
                     f.write(control_script)
 
-                go_script += f"python3 tools/build.py --{config.assembler} --output source/{host_filepath_relative_to_script}_{config.assembler}.asm\n"
-
                 # Execute the control file (calls py8dis to create the assembly file)
-                asm_filepath = os.path.join(source_directory, os.path.basename(file.host_filepath) + ".asm")
-                disassemble(control_filepath, asm_filepath)
+                build_script += f'\n# Create disassembly {file.bbc_filepath}\n'
+                build_script += f'destination_filepath = os.path.join(script_dir, "build", "disc", "{os.path.basename(file.host_filepath)}")\n'
+                asm_file = f"{os.path.basename(file.host_filepath)}_{config.assembler}.asm"
+                build_script += f'disassemble("{os.path.basename(control_filepath)}", "{asm_file}")\n'
 
-    # Write the go script
-    with open(os.path.join(config.destination_folder, "go"), "w") as f:
-        f.write(go_script)
+                # Assemble asm into new binaries
+                build_script += f'assemble("{asm_file}", "{os.path.basename(file.host_filepath)}")\n'
+                # Create INF for destination file
+                build_script += f'make_inf(destination_filepath, "{file.bbc_filepath}", 0x{file.load_address:08x}, 0x{file.exec_address:08x}, "{"L" if file.locked else ""}")\n'
 
-    # Assemble the files using acme or beebasm
-    if config.assembler == "acme":
-        pass
-    elif config.assembler == "beebasm":
-        pass
-    else:
-        pass
+    # Create disc image
+    build_script += f'\n# Create {config.extension}\n'
+    build_script += f'with dfsimage.Image.create("{os.path.splitext(os.path.basename(config.ssd_filepath))[0]}_new.ssd") as image:\n'
+    for f in files_to_process:
+        build_script += f"    image.import_files(os_files=f\"{{os.path.join(script_dir, 'build', 'disc', '{os.path.basename(f.host_filepath)}')}}\", dfs_names='{f.bbc_filepath}', ignore_access=True, inf_mode=dfsimage.InfMode.NEVER, load_addr=0x{f.load_address:08x},  exec_addr=0x{f.exec_address:08x}, locked={f.locked}, replace=True)\n"
+
+    # Copy dfsimage
+    shutil.copytree(os.path.join(script_dir, "dfsimage"), os.path.join(config.destination_folder, "dfsimage"), dirs_exist_ok=True)
+
+    # Write the build script
+    with open(os.path.join(config.destination_folder, "build.py"), "w") as f:
+        f.write(build_script)
+
 
 def test():
     image = dfsimage.Image("../tempest/Disc010-Tempest.ssd", open_mode=dfsimage.OpenMode.EXISTING)
