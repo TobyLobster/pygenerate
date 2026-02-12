@@ -1,55 +1,110 @@
 #!/usr/bin/env python3
+"""
+BBC Micro file processor and build system generator.
 
-import shutil           # for copying files
-import sys              # for exiting the script with an exit code
-import os               # for path manipulation
-import subprocess       # for running other processes
-import re               # for parsing INF files
+Reads BBC Micro files from SSD/DSD disk images or loose files with .INF metadata,
+generates editable source files (assembly, BASIC, text), and creates build scripts
+to reassemble them into new disk images.
 
-import dfsimage                 # for reading BBC disk images
-import bbc_basic_detokenizer    # For identifying and detokenising BASIC
+Usage:
+    python3 pygenerate.py <filepath.ssd|filepath.dsd|directory> [--acme|--beebasm] [--verbose]
 
+Requirements:
+    - py8dis: https://github.com/ZornsLemma/py8dis
+    - beebasm or acme assembler
+    - dfsimage, bbc_basic_detokenizer (Python packages)
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+import sys
+from typing import TYPE_CHECKING
+
+import bbc_basic_detokenizer
+import dfsimage
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+# Character used to represent the pound sign in BBC Micro filenames
 BBC_POUND = "`"
-UNICODE_POUND = bytes((0xa3, )).decode("iso8859-1")
+UNICODE_POUND = bytes((0xa3,)).decode("iso8859-1")
+
+# Standard load address for sideways ROMs
+SIDEWAYS_ROM_ADDRESS = 0x8000
 
 script_dir = os.path.dirname(os.path.realpath(__file__))
 
 class BBCMicroFile:
-    def __init__(self, host_filepath="", bbc_filepath="", load_address=0, exec_address=0, locked=False):
-        self.host_filepath = host_filepath  # Host system filepath
-        self.bbc_filepath  = bbc_filepath   # BBC Micro DFS filepath
-        self.load_address = load_address    # Load address
-        self.exec_address = exec_address    # Exec address
-        self.locked = locked                # Lock status
+    """Represents a BBC Micro file with its metadata.
 
-        # Derived values
-        self.length = None
-        self.source_filepath = None
+    Attributes:
+        host_filepath: Path to the file on the host system.
+        bbc_filepath: Original BBC Micro DFS filepath (e.g., "$.PROG").
+        load_address: Memory address where the file should be loaded.
+        exec_address: Memory address to begin execution.
+        locked: Whether the file is locked on the DFS.
+        length: File size in bytes (set after reading).
+        source_filepath: Path to the generated source file.
+    """
+
+    def __init__(
+        self,
+        host_filepath: str = "",
+        bbc_filepath: str = "",
+        load_address: int = 0,
+        exec_address: int = 0,
+        locked: bool = False,
+    ) -> None:
+        self.host_filepath = host_filepath
+        self.bbc_filepath = bbc_filepath
+        self.load_address = load_address
+        self.exec_address = exec_address
+        self.locked = locked
+        self.length: int | None = None
+        self.source_filepath: str | None = None
+
 
 class Config:
-    def __init__(self):
-        self.ssd_filepath        = ""            # The filepath to the BBC Micro disk image (SSD / DSD)
-        self.loose_folder        = ""            # The folder where the loose BBC Micro files are to be found
-        self.destination_folder  = ""            # Destination folder
-        self.extension           = ""            # Extension SSD / DSD
-        self.verbose             = False
-        self.assembler           = "beebasm"     # Can be 'acme' or 'beebasm'
+    """Configuration settings for the pygenerate tool.
+
+    Attributes:
+        ssd_filepath: Path to the BBC Micro disk image (SSD/DSD).
+        loose_folder: Directory containing loose BBC Micro files.
+        destination_folder: Output directory for generated files.
+        extension: File extension of the source disk image.
+        verbose: Whether to print verbose output.
+        assembler: Assembler to use ('acme' or 'beebasm').
+    """
+
+    def __init__(self) -> None:
+        self.ssd_filepath: str = ""
+        self.loose_folder: str = ""
+        self.destination_folder: str = ""
+        self.extension: str = ""
+        self.verbose: bool = False
+        self.assembler: str = "beebasm"
+
 
 config = Config()
 
-def exit_with_message(code, message):
+
+def exit_with_message(code: int, message: str) -> None:
+    """Print an error message and exit with the given code."""
     if code != 0:
-        print("ERROR: " + message + " (exit code " + str(code) + ")")
+        print(f"ERROR: {message} (exit code {code})")
     sys.exit(code)
 
-# Convert a relative path to an absolute path
-def make_absolute_filepath(relative_filepath):
-    # Get path to current working directory
-    dirname = os.getcwd()
-    return os.path.join(dirname, relative_filepath)
+def make_absolute_filepath(relative_filepath: str) -> str:
+    """Convert a relative path to an absolute path based on the current working directory."""
+    return os.path.join(os.getcwd(), relative_filepath)
 
-# Copy a file
-def safe_copy(source, destination):
+
+def safe_copy(source: str, destination: str) -> None:
+    """Copy a file, exiting with an error message on failure."""
     try:
         shutil.copy(source, destination)
     except FileNotFoundError:
@@ -61,65 +116,94 @@ def safe_copy(source, destination):
     except OSError as e:
         exit_with_message(-4, f"An OS error occurred: {e.strerror}.")
     except TypeError:
-        exit_with_message(-5, f"Invalid type for source or destination path.")
+        exit_with_message(-5, "Invalid type for source or destination path.")
 
-# Execute a subprocess, returning the stdout
-def run(args, error_message, cwd=None):
+
+def run_subprocess(args: list[str], error_message: str, cwd: str | None = None) -> bytes:
+    """Execute a subprocess and return stdout, exiting on failure."""
     if config.verbose:
         print(args)
-    p = subprocess.run(args, capture_output=True, cwd=cwd)
-    if p.returncode != 0:
+    result = subprocess.run(args, capture_output=True, cwd=cwd)
+    if result.returncode != 0:
         print(args)
-        print(p.stderr.decode())
-        exit_with_message(p.returncode, error_message)
-    return p.stdout
+        print(result.stderr.decode())
+        exit_with_message(result.returncode, error_message)
+    return result.stdout
 
-# Make a directory
-def make_directory(directory):
+
+def make_directory(directory: str) -> None:
+    """Create a directory and any necessary parent directories."""
     os.makedirs(directory, exist_ok=True)
 
-# Make a list of the files in a directory that *don't* have a .inf extension
-def list_files_without_inf_extension(dir_path):
-    return [os.path.join(dir_path, f) for f in os.listdir(dir_path) if os.path.isfile(os.path.join(dir_path, f)) and not f.lower().endswith('.inf')]
 
-# Make a list of the files in a directory that *do* have a .inf extension
-def list_files_with_inf_extension(dir_path):
-    return [os.path.join(dir_path, f) for f in os.listdir(dir_path) if os.path.isfile(os.path.join(dir_path, f)) and f.lower().endswith('.inf')]
+def list_files_without_inf_extension(dir_path: str) -> list[str]:
+    """Return paths to files in a directory that don't have a .inf extension."""
+    return [
+        os.path.join(dir_path, filename)
+        for filename in os.listdir(dir_path)
+        if os.path.isfile(os.path.join(dir_path, filename))
+        and not filename.lower().endswith('.inf')
+    ]
 
 
-# Translate a BBC Micro FS filename into a filename suitable for the host environment
-def convert_to_host_filename(bbc_filename):
-    filename = bbc_filename.replace("/" , "#slash")
-    filename = filename.replace("?"     , "#question")
-    filename = filename.replace("<"     , "#less")
-    filename = filename.replace(">"     , "#greater")
-    filename = filename.replace("\\"    , "#backslash")
-    filename = filename.replace(":"     , "#colon")
-    filename = filename.replace("*"     , "#star")
-    filename = filename.replace("|"     , "#bar")
-    filename = filename.replace("\""    , "#quote")
-    filename = filename.replace(BBC_POUND, UNICODE_POUND)
-    return filename
+def list_files_with_inf_extension(dir_path: str) -> list[str]:
+    """Return paths to files in a directory that have a .inf extension."""
+    return [
+        os.path.join(dir_path, filename)
+        for filename in os.listdir(dir_path)
+        if os.path.isfile(os.path.join(dir_path, filename))
+        and filename.lower().endswith('.inf')
+    ]
 
-# Convert back a host filename previously converted from a BBC Micro FS filename
-def convert_to_bbc_filename(host_filename):
-    filename = host_filename.replace("#slash"   , "/")
-    filename = filename.replace("#question"     , "?")
-    filename = filename.replace("#less"         , "<")
-    filename = filename.replace("#greater"      , ">")
-    filename = filename.replace("#backslash"    , "\\")
-    filename = filename.replace("#colon"        , ":")
-    filename = filename.replace("#star"         , "*")
-    filename = filename.replace("#bar"          , "|")
-    filename = filename.replace("#quote"        , "\"")
-    filename = filename.replace(UNICODE_POUND, BBC_POUND)
-    return filename
 
-def disk_metadata(disk_path: str):
+# Character mapping from BBC Micro to host filesystem
+_BBC_TO_HOST_CHAR_MAP = {
+    "/": "#slash",
+    "?": "#question",
+    "<": "#less",
+    ">": "#greater",
+    "\\": "#backslash",
+    ":": "#colon",
+    "*": "#star",
+    "|": "#bar",
+    '"': "#quote",
+    BBC_POUND: UNICODE_POUND,
+}
+
+# Reverse mapping from host filesystem to BBC Micro
+_HOST_TO_BBC_CHAR_MAP = {v: k for k, v in _BBC_TO_HOST_CHAR_MAP.items()}
+
+
+def convert_to_host_filename(bbc_filename: str) -> str:
+    """Convert a BBC Micro DFS filename to a host filesystem-safe filename.
+
+    Replaces characters that are invalid on common filesystems (e.g., /, ?, <, >)
+    with safe placeholders like #slash, #question, etc.
+    """
+    result = bbc_filename
+    for bbc_char, host_char in _BBC_TO_HOST_CHAR_MAP.items():
+        result = result.replace(bbc_char, host_char)
+    return result
+
+
+def convert_to_bbc_filename(host_filename: str) -> str:
+    """Convert a host filename back to the original BBC Micro DFS filename.
+
+    Reverses the character replacements made by convert_to_host_filename().
+    """
+    result = host_filename
+    for host_char, bbc_char in _HOST_TO_BBC_CHAR_MAP.items():
+        result = result.replace(host_char, bbc_char)
+    return result
+
+
+def disk_metadata(disk_path: str) -> list[tuple[str, int]]:
+    """Return a list of (title, boot_option) tuples for each side of a disk image."""
     with dfsimage.Image(disk_path) as img:
-        return ([(side.title, side.opt) for side in img.sides])
+        return [(side.title, side.opt) for side in img.sides]
 
-def extract_manually(disk_path: str, output_dir: str):
+
+def extract_manually(disk_path: str, output_dir: str) -> None:
     """Extract files manually with full control."""
     os.makedirs(output_dir, exist_ok=True)
 
@@ -150,25 +234,31 @@ def extract_manually(disk_path: str, output_dir: str):
                     f.write(inf)
 
 def read_inf(host_filepath: str) -> BBCMicroFile:
+    """Read a .inf metadata file and return a BBCMicroFile with the parsed information."""
     result = BBCMicroFile(host_filepath)
 
-    with open(host_filepath + ".inf", "r") as file:
-        input_string = file.read()
+    with open(host_filepath + ".inf", "r") as inf_file:
+        input_string = inf_file.read()
 
-        args = [word for word in input_string.split(' ') if word]
-        if "L" in args:
-            args.remove("L")
+        tokens = [word for word in input_string.split(' ') if word]
+        if "L" in tokens:
+            tokens.remove("L")
             result.locked = True
-        if "Locked" in args:
-            args.remove("Locked")
+        if "Locked" in tokens:
+            tokens.remove("Locked")
             result.locked = True
-        result.bbc_filepath = args[0]
-        result.load_address = int(args[1], 16)
-        result.exec_address = int(args[2], 16)
+        result.bbc_filepath = tokens[0]
+        result.load_address = int(tokens[1], 16)
+        result.exec_address = int(tokens[2], 16)
 
     return result
 
+
 def is_disassembly(file: dfsimage.Entry, content: bytes) -> bool:
+    """Check if a file appears to be executable code that should be disassembled.
+
+    Returns True if the exec_address points to a valid, non-zero byte within the file.
+    """
     if file.exec_address == 0:
         return False
     if file.exec_address < file.load_address:
@@ -179,21 +269,25 @@ def is_disassembly(file: dfsimage.Entry, content: bytes) -> bool:
         return False
     return True
 
-def is_mostly_printable(data: bytes, threshold: float=0.95) -> bool:
-    """Check if at least threshold of bytes are printable ASCII or carriage returns."""
+
+def is_mostly_printable(data: bytes, threshold: float = 0.95) -> bool:
+    """Check if at least threshold proportion of bytes are printable ASCII or CR."""
     if not data:
         return True
-    printable_count = sum(1 for b in data if 32 <= b <= 126 or (b == 13))
+    printable_count = sum(1 for b in data if 32 <= b <= 126 or b == 13)
     return printable_count >= (threshold * len(data))
 
+
 def is_totally_printable(data: bytes) -> bool:
-    """Check if at least threshold of bytes are printable ASCII or carriage returns."""
+    """Check if all bytes are printable ASCII or carriage returns."""
     if not data:
         return True
-    printable_count = sum(1 for b in data if 32 <= b <= 126 or (b == 13))
+    printable_count = sum(1 for b in data if 32 <= b <= 126 or b == 13)
     return printable_count == len(data)
 
-def show_usage():
+
+def show_usage() -> None:
+    """Print usage information and requirements."""
     print("This utility reads BBC Micro files (from SSD, DSD, or a directory of files perhaps with associated .INF files), and:")
     print("    (a) creates editable source files based on the file contents (e.g. assembly language files for code, text files for BASIC),")
     print("    (b) assembles them into new binaries (identical to the original binaries) and")
@@ -204,7 +298,13 @@ def show_usage():
     print("")
     print("USAGE: pygenerate <filepath to ssd> {--acme} {--beebasm}")
 
-def main(args):
+
+def main(args: Sequence[str]) -> None:
+    """Main entry point for pygenerate.
+
+    Args:
+        args: Command-line arguments (excluding the script name).
+    """
     if len(args) == 0:
         show_usage()
         exit_with_message(0, "")
@@ -345,12 +445,12 @@ os.makedirs(os.path.join(script_dir, "build", "disc"), exist_ok=True)
 """
 
     # Process each file, creating a control script for each binary we need to deal with
-    for file in files_to_process:
-        with open(file.host_filepath, "rb") as f:
-            content = f.read()
-            file.length = len(content)
+    for bbc_file in files_to_process:
+        with open(bbc_file.host_filepath, "rb") as fh:
+            content = fh.read()
+            bbc_file.length = len(content)
 
-            print(f'Processing file {file.bbc_filepath}')
+            print(f'Processing file {bbc_file.bbc_filepath}')
 
             # Check if it's BASIC:
             listing, end_index, success = bbc_basic_detokenizer.decode_basic(content)
@@ -359,39 +459,39 @@ os.makedirs(os.path.join(script_dir, "build", "disc"), exist_ok=True)
                 basic_txt = "".join(listing)
 
                 # Write the BASIC text out to source folder
-                file.source_filepath = os.path.join(source_directory, os.path.basename(file.host_filepath) + "_basic.txt")
-                with open(file.source_filepath, "w") as f:
-                    f.write(basic_txt)
+                bbc_file.source_filepath = os.path.join(source_directory, os.path.basename(bbc_file.host_filepath) + "_basic.txt")
+                with open(bbc_file.source_filepath, "w") as fh:
+                    fh.write(basic_txt)
 
-                if (end_index < file.length):
+                if end_index < bbc_file.length:
                     print(f"with {len(content) - end_index} more bytes beyond the end of the BASIC program")
 
                 # Convert to BASIC II format on disc
-                build_script += f'\n# Create BASIC file {file.bbc_filepath}\n'
-                build_script += f'source_filepath = os.path.join(script_dir, "source", "{os.path.basename(file.source_filepath)}")\n'
-                build_script += f'destination_filepath = os.path.join(script_dir, "build", "disc", "{os.path.basename(file.host_filepath)}")\n'
+                build_script += f'\n# Create BASIC file {bbc_file.bbc_filepath}\n'
+                build_script += f'source_filepath = os.path.join(script_dir, "source", "{os.path.basename(bbc_file.source_filepath)}")\n'
+                build_script += f'destination_filepath = os.path.join(script_dir, "build", "disc", "{os.path.basename(bbc_file.host_filepath)}")\n'
                 build_script += f'with open(source_filepath, "rb") as f:\n'
                 build_script += f'    tokenized_result = bbc_basic_tokenizer.tokenize_file(f, input_file_contains_escaped_chars=True)\n'
                 build_script += f'    with open(destination_filepath, "wb") as file:\n'
                 build_script += f'        file.write(bytearray(tokenized_result))\n'
                 # Create INF for destination file
-                build_script += f'make_inf(destination_filepath, "{file.bbc_filepath}", 0x{file.load_address:08x}, 0x{file.exec_address:08x}, "{"L" if file.locked else ""}")\n'
+                build_script += f'make_inf(destination_filepath, "{bbc_file.bbc_filepath}", 0x{bbc_file.load_address:08x}, 0x{bbc_file.exec_address:08x}, "{"L" if bbc_file.locked else ""}")\n'
 
             elif is_totally_printable(content):
                 # Write the current file content into a file in source_directory, with carriage returns converted to the host OS line ending
-                file.source_filepath = os.path.join(source_directory, os.path.basename(file.host_filepath) + ".txt")
-                with open(file.source_filepath, "wb") as f:
-                    f.write(content.replace(b'\x0d', os.linesep.encode()))
+                bbc_file.source_filepath = os.path.join(source_directory, os.path.basename(bbc_file.host_filepath) + ".txt")
+                with open(bbc_file.source_filepath, "wb") as fh:
+                    fh.write(content.replace(b'\x0d', os.linesep.encode()))
 
-                build_script += f'\n# Create text file {file.bbc_filepath}\n'
-                build_script += f'destination_filepath = os.path.join(script_dir, "build", "disc", "{os.path.basename(file.host_filepath)}")\n'
-                build_script += f'copy_text_to_bbc(os.path.join(script_dir, "source", "{os.path.basename(file.source_filepath)}"), destination_filepath)\n'
-                build_script += f'make_inf(destination_filepath, "{file.bbc_filepath}", 0x{file.load_address:08x}, 0x{file.exec_address:08x}, "{"L" if file.locked else ""}")\n'
+                build_script += f'\n# Create text file {bbc_file.bbc_filepath}\n'
+                build_script += f'destination_filepath = os.path.join(script_dir, "build", "disc", "{os.path.basename(bbc_file.host_filepath)}")\n'
+                build_script += f'copy_text_to_bbc(os.path.join(script_dir, "source", "{os.path.basename(bbc_file.source_filepath)}"), destination_filepath)\n'
+                build_script += f'make_inf(destination_filepath, "{bbc_file.bbc_filepath}", 0x{bbc_file.load_address:08x}, 0x{bbc_file.exec_address:08x}, "{"L" if bbc_file.locked else ""}")\n'
 
             else:
                 # Disassemble
                 # Add to python control script that will invoke py8dis to disassemble the file
-                control_script = f"# Control script for disassembling '{os.path.basename(file.host_filepath)}'\n\n"
+                control_script = f"# Control script for disassembling '{os.path.basename(bbc_file.host_filepath)}'\n\n"
                 control_script += """from commands import *
 import acorn
 import os
@@ -410,32 +510,32 @@ py_dir = os.path.dirname(os.path.abspath(__file__))
 """
                 # For tempest: move(0x0a00, 0x1900, 0x4300-0x1900)
 
-                control_filepath = os.path.join(control_directory, os.path.basename(file.host_filepath) + ".py")
+                control_filepath = os.path.join(control_directory, os.path.basename(bbc_file.host_filepath) + ".py")
 
-                host_filepath_relative_to_script = os.path.relpath(file.host_filepath, control_directory)
+                host_filepath_relative_to_script = os.path.relpath(bbc_file.host_filepath, control_directory)
 
-                control_script += f'# FILE {file.bbc_filepath}\n'
-                control_script += f'load(0x{file.load_address:04x}, os.path.join(py_dir, "{host_filepath_relative_to_script}"), "6502")\n'
-                if file.load_address == 0x8000:
-                    control_script += f'acorn.is_sideways_rom()'
-                if (file.load_address != 0) and (file.exec_address >= file.load_address) and (file.exec_address < (file.load_address + file.length)):
-                    control_script += f'entry(0x{file.exec_address:04x}, "entry_point")\n'
+                control_script += f'# FILE {bbc_file.bbc_filepath}\n'
+                control_script += f'load(0x{bbc_file.load_address:04x}, os.path.join(py_dir, "{host_filepath_relative_to_script}"), "6502")\n'
+                if bbc_file.load_address == SIDEWAYS_ROM_ADDRESS:
+                    control_script += 'acorn.is_sideways_rom()\n'
+                if (bbc_file.load_address != 0) and (bbc_file.exec_address >= bbc_file.load_address) and (bbc_file.exec_address < (bbc_file.load_address + bbc_file.length)):
+                    control_script += f'entry(0x{bbc_file.exec_address:04x}, "entry_point")\n'
                 control_script += "\ngo()\n"
 
                 # Write the control file
-                with open(control_filepath, "w") as f:
-                    f.write(control_script)
+                with open(control_filepath, "w") as fh:
+                    fh.write(control_script)
 
                 # Execute the control file (calls py8dis to create the assembly file)
-                build_script += f'\n# Create disassembly {file.bbc_filepath}\n'
-                build_script += f'destination_filepath = os.path.join(script_dir, "build", "disc", "{os.path.basename(file.host_filepath)}")\n'
-                asm_file = f"{os.path.basename(file.host_filepath)}_{config.assembler}.asm"
+                build_script += f'\n# Create disassembly {bbc_file.bbc_filepath}\n'
+                build_script += f'destination_filepath = os.path.join(script_dir, "build", "disc", "{os.path.basename(bbc_file.host_filepath)}")\n'
+                asm_file = f"{os.path.basename(bbc_file.host_filepath)}_{config.assembler}.asm"
                 build_script += f'disassemble("{os.path.basename(control_filepath)}", "{asm_file}")\n'
 
                 # Assemble asm into new binaries
-                build_script += f'assemble("{asm_file}", "{os.path.basename(file.host_filepath)}")\n'
+                build_script += f'assemble("{asm_file}", "{os.path.basename(bbc_file.host_filepath)}")\n'
                 # Create INF for destination file
-                build_script += f'make_inf(destination_filepath, "{file.bbc_filepath}", 0x{file.load_address:08x}, 0x{file.exec_address:08x}, "{"L" if file.locked else ""}")\n'
+                build_script += f'make_inf(destination_filepath, "{bbc_file.bbc_filepath}", 0x{bbc_file.load_address:08x}, 0x{bbc_file.exec_address:08x}, "{"L" if bbc_file.locked else ""}")\n'
 
     # Create disc image
     build_script += f'\n# Create {config.extension}\n'
@@ -450,52 +550,16 @@ py_dir = os.path.dirname(os.path.abspath(__file__))
         side_index += 1
 
     # Add files
-    for f in files_to_process:
-        #build_script += f"    image.import_files(os_files=f\"{{os.path.join(script_dir, 'build', 'disc', '{os.path.basename(f.host_filepath)}')}}\", dfs_names='{f.bbc_filepath}', ignore_access=True, inf_mode=dfsimage.InfMode.NEVER, load_addr=0x{f.load_address:08x},  exec_addr=0x{f.exec_address:08x}, locked={f.locked}, replace=True)\n"
-        build_script += f"    add_file(image, os.path.join(script_dir, 'build', 'disc', '{os.path.basename(f.host_filepath)}'), '{f.bbc_filepath}', load_addr=0x{f.load_address:08x},  exec_addr=0x{f.exec_address:08x}, locked={f.locked})\n"
+    for bbc_file in files_to_process:
+        build_script += f"    add_file(image, os.path.join(script_dir, 'build', 'disc', '{os.path.basename(bbc_file.host_filepath)}'), '{bbc_file.bbc_filepath}', load_addr=0x{bbc_file.load_address:08x},  exec_addr=0x{bbc_file.exec_address:08x}, locked={bbc_file.locked})\n"
 
     # Copy dfsimage
     shutil.copytree(os.path.join(script_dir, "dfsimage"), os.path.join(config.destination_folder, "dfsimage"), dirs_exist_ok=True)
 
     # Write the build script
-    with open(os.path.join(config.destination_folder, "build.py"), "w") as f:
-        f.write(build_script)
+    with open(os.path.join(config.destination_folder, "build.py"), "w") as fh:
+        fh.write(build_script)
 
 
-def test():
-    image = dfsimage.Image("../tempest/Disc010-Tempest.ssd", open_mode=dfsimage.OpenMode.EXISTING)
-
-    for side in image.sides:
-        # The lower four bits of the option byte are the !BOOT option, usually in the range 0-3
-        boot_option = side.opt_byte & 15
-        if boot_option > 3:
-            boot_option_string = str(boot_option)
-        else:
-            boot_option_string = ["Ignore", "*LOAD", "*RUN", "*EXEC"][boot_option]
-        print(f'Found a side with title "{side.title}" and the "{boot_option_string}" boot option')
-
-        for file in side.files:
-            print(f'Found file {file.index}: "{file.fullname}" {hex(file.load_address)[2:]} {hex(file.exec_address)[2:]} {hex(file.size)[2:]}')
-            content = file.readall()
-
-            # First check if it's BASIC:
-            listing, end_index, success = bbc_basic_detokenizer.decode_basic(content)
-            if success:
-                # BASIC program found
-                basic_txt = "".join(listing)
-
-                file.basic_end_index = end_index
-                if (end_index < len(content)):
-                    print(f"with {len(content) - end_index} more bytes beyond the end of the BASIC program")
-            elif is_mostly_printable(content):
-                # Text file found
-                print(content)
-            elif is_disassembly(file, content):
-                # disassemble
-                print("Disasssembly")
-            else:
-                # hex
-                print("Hex")
-
-if __name__=="__main__":
+if __name__ == "__main__":
     main(sys.argv[1:])
