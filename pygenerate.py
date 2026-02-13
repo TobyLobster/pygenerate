@@ -3,7 +3,7 @@
 BBC Micro file processor and build system generator.
 
 Reads BBC Micro files from SSD/DSD disk images or loose files with .INF metadata,
-generates editable source files (assembly, BASIC, text), and creates build scripts
+generates editable source files (assembly, BASIC as text, etc), and creates build scripts
 to reassemble them into new disk images.
 
 Usage:
@@ -11,8 +11,7 @@ Usage:
 
 Requirements:
     - py8dis: https://github.com/ZornsLemma/py8dis
-    - beebasm or acme assembler
-    - dfsimage, bbc_basic_detokenizer (Python packages)
+    - beebasm or acme assembler: https://github.com/stardot/beebasm/ or https://sourceforge.net/projects/acme-crossass/
 """
 
 from __future__ import annotations
@@ -206,6 +205,7 @@ def disk_metadata(disk_path: str) -> list[tuple[str, int]]:
 def extract_manually(disk_path: str, output_dir: str) -> None:
     """Extract files manually with full control."""
     os.makedirs(output_dir, exist_ok=True)
+    result = []
 
     with dfsimage.Image(disk_path) as img:
         for side in img.sides:
@@ -232,6 +232,11 @@ def extract_manually(disk_path: str, output_dir: str) -> None:
                 inf_path = os.path.join(side_dir, name + ".inf")
                 with open(inf_path, 'w') as f:
                     f.write(inf)
+
+                bbc_file = BBCMicroFile(out_path, bbc_filepath = entry.fullname, load_address = entry.load_address, exec_address = entry.exec_address, locked = entry.locked)
+                result.append(bbc_file)
+    return result
+
 
 def read_inf(host_filepath: str) -> BBCMicroFile:
     """Read a .inf metadata file and return a BBCMicroFile with the parsed information."""
@@ -289,9 +294,13 @@ def is_totally_printable(data: bytes) -> bool:
 def show_usage() -> None:
     """Print usage information and requirements."""
     print("This utility reads BBC Micro files (from SSD, DSD, or a directory of files perhaps with associated .INF files), and:")
-    print("    (a) creates editable source files based on the file contents (e.g. assembly language files for code, text files for BASIC),")
-    print("    (b) assembles them into new binaries (identical to the original binaries) and")
-    print("    (c) recreates an SSD or DSD from the results.")
+    print("    (a) Creates editable source/ files based on the file contents (e.g. assembly language files for code, text files for BASIC, etc),")
+    print("    (b) Creates editable control/ files that control how the code gets disassembled (See py8dis documentation for details)")
+    print("    (c) Creates a build.py script that:")
+    print("        (i) disassembles the binary files according to the control/ files to get assembly files, then")
+    print("        (ii) reassembles them into new build/disc/ binaries (identical to the original binaries), and")
+    print("        (iii) recreates a new SSD or DSD from these.")
+    print("The idea is to use pygenerate once to create an initial pass at a disassembly, then repeatedly call build.py after updating the control files to label the assembly better")
     print("This utility requires:")
     print("    'py8dis' (https://github.com/ZornsLemma/py8dis) to be visible to Python, e.g. in PYTHONPATH or in the same directory as this python script.")
     print("    'beebasm' or 'acme' assembler (https://github.com/stardot/beebasm/ or https://sourceforge.net/projects/acme-crossass/)")
@@ -338,13 +347,11 @@ def main(args: Sequence[str]) -> None:
     make_directory(control_directory)
 
     # Extract files from SSD into a list of loose files with .INF files
-    if len(config.ssd_filepath) > 0:
-        extract_manually(config.ssd_filepath, original_directory)
-        config.loose_folder = original_directory
-
-    # Enumerate the loose files (with or without a .inf file)
     files_to_process = []
-    if len(config.loose_folder) > 0:
+    if len(config.ssd_filepath) > 0:
+        files_to_process = extract_manually(config.ssd_filepath, original_directory)
+    elif len(config.loose_folder) > 0:
+        # Enumerate loose files (with or without a .inf file)
         disk_files = []
 
         binary_filenames = list_files_without_inf_extension(config.loose_folder)
@@ -371,77 +378,161 @@ def main(args: Sequence[str]) -> None:
             files_to_process.append(bbc_file)
 
     if config.assembler == "acme":
-        assemble = """args = ["acme", "--symbollist", symbols_filepath, "-r", report_filepath, "-o", binary_filepath, asm_filepath]
+        assemble = """args = ["acme", "--symbollist", symbols_filepath, "-r", report_filepath, "-o", str(binary_filepath_full), str(asm_filepath_full)]
     run(args, "assembly failed")"""
     elif config.assembler == "beebasm":
-        # beebasm -o disk/imogen -i source/imogen.asm -v > build/imogen.lst
-
-        assemble = """args = ["beebasm", "-o", binary_filepath, "-i", asm_filepath, "-v"]
+        assemble = """args = ["beebasm", "-o", str(binary_filepath_full), "-i", str(asm_filepath_full), "-v"]
 
     report = run(args, "assembly failed")
     with open(report_filepath, "wb") as f:
         f.write(report)"""
 
     build_script = f"""#!/usr/bin/env python3
+\"\"\"Build script for creating BBC Micro disk images for {os.path.basename(config.destination_folder)}.
+
+This script:
+- Disassembles binaries via control files into {config.assembler} assembly
+- Assembles source files to binaries
+- Tokenizes BBC BASIC programs
+- Packages everything into an SSD disk image
+\"\"\"
+
 import os
 import subprocess
-import glob
+import sys
+from pathlib import Path
+
 import bbc_basic_tokenizer  # For tokenising BASIC programs
-import dfsimage             # for writing BBC disk images
+import dfsimage             # For writing BBC disk images
 
 
 # Get the full directory path of this script
-script_dir = os.path.dirname(os.path.realpath(__file__))
+script_dir = Path(__file__).resolve().parent
 
-# Execute a subprocess, returning the stdout
-def run(args, error_message, cwd=None):
+def run(args: list[str], error_message: str, cwd: Path | None = None) -> bytes:
+    \"\"\"Execute a subprocess and return stdout.
+
+    Args:
+        args: Command and arguments to execute.
+        error_message: Message to display if the command fails.
+        cwd: Working directory for the subprocess.
+
+    Returns:
+        The stdout output from the subprocess.
+    \"\"\"
     p = subprocess.run(args, capture_output=True, cwd=cwd)
     if p.returncode != 0:
         print(args)
         print(p.stderr.decode())
         print(error_message)
-        exit(p.returncode)
+        sys.exit(p.returncode)
     return p.stdout
 
-def disassemble(python_filepath, asm_filepath):
-    # Run a python control script to create Beebasm or Acme asm files
 
-    python_filepath = os.path.join(script_dir, "control", python_filepath)
-    asm_filepath = os.path.join(script_dir, "source", asm_filepath)
+def disassemble(python_filepath: str, asm_filepath: str) -> None:
+    \"\"\"Run a Python control script to create BeebAsm assembly files.
 
-    # Create assembly files
-    args = ["python3", python_filepath, "--{config.assembler}", "--output", asm_filepath]
+    Args:
+        python_filepath: Relative path to the control script (within 'control' dir).
+        asm_filepath: Relative path for the output assembly file (within 'source' dir).
+    \"\"\"
+    python_filepath_full = script_dir / "control" / python_filepath
+    asm_filepath_full = script_dir / "source" / asm_filepath
+
+    args = ["python3", str(python_filepath_full), "--beebasm", "--output", str(asm_filepath_full)]
     run(args, "disassemble failed")
 
-def make_inf(binary_filepath, bbc_bin_filename, load_address, exec_address, locked):
+
+def make_inf(binary_filepath: Path, bbc_bin_filename: str, load_address: int, exec_address: int, locked: str) -> None:
+    \"\"\"Create a .inf metadata file for a BBC Micro binary.
+
+    Args:
+        binary_filepath: Path to the binary file.
+        bbc_bin_filename: DFS filename (e.g. '$.TEMPEST').
+        load_address: Memory address where the file should be loaded.
+        exec_address: Memory address to execute from.
+        locked: Lock status ('L' for locked, '' for unlocked).
+    \"\"\"
     inf_text = f'{{bbc_bin_filename:<12}} {{load_address:08x}} {{exec_address:08x}} {{locked}}'
-    with open(binary_filepath + ".inf", "w") as text_file:
+    with open(str(binary_filepath) + ".inf", "w") as text_file:
         text_file.write(inf_text)
 
-def assemble(asm_filepath, binary_filepath):
-    asm_filepath     = os.path.join(script_dir, "source", asm_filepath)
-    binary_filepath  = os.path.join(script_dir, "build", "disc", binary_filepath)
-    asm_filename     = os.path.splitext(os.path.basename(asm_filepath))[0]
-    symbols_filepath = os.path.join(script_dir, "build", asm_filename + "_symbols.txt")
-    report_filepath  = os.path.join(script_dir, "build", asm_filename + "_report.txt")
+
+def assemble(asm_filepath: str, binary_filepath: str) -> None:
+    \"\"\"Assemble a BeebAsm source file to a binary.
+
+    Args:
+        asm_filepath: Relative path to the assembly source (within 'source' dir).
+        binary_filepath: Relative path for the output binary (within 'build/disc' dir).
+    \"\"\"
+    asm_filepath_full = script_dir / "source" / asm_filepath
+    binary_filepath_full = script_dir / "build" / "disc" / binary_filepath
+    asm_filename = asm_filepath_full.stem
+    report_filepath = script_dir / "build" / f"{{asm_filename}}_report.txt"
 
     # Assemble
     {assemble}
 
-def copy_text_to_bbc(source_filepath, destination_filepath):
-    # Read the source file
+
+def copy_text_to_bbc(source_filepath: Path, destination_filepath: Path) -> None:
+    \"\"\"Copy a text file, converting line endings to BBC Micro format.
+
+    Args:
+        source_filepath: Path to the source text file.
+        destination_filepath: Path for the output file.
+    \"\"\"
     with open(source_filepath, "rb") as f:
         content = f.read()
 
-    # Write the destination file, replacing the host line terminator with the BBC Micro line terminator (0x0d)
+    # Replace host line terminator with BBC Micro line terminator (0x0d)
     with open(destination_filepath, "wb") as f:
         f.write(content.replace(os.linesep.encode(), b'\\x0d'))
 
-def add_file(image, input_file, dfs, load_addr, exec_addr, locked=True):
-    image.import_files(os_files=input_file, dfs_names=dfs, ignore_access=True, inf_mode=dfsimage.InfMode.NEVER, load_addr=0x00000000,  exec_addr=0x00000000, locked=True, replace=True)
+
+def tokenize_basic(source_filepath: Path, destination_filepath: Path) -> None:
+    \"\"\"Tokenize a BBC BASIC source file.
+
+    Args:
+        source_filepath: Path to the BASIC source text file.
+        destination_filepath: Path for the tokenized output file.
+    \"\"\"
+    with open(source_filepath, "rb") as f:
+        tokenized_result = bbc_basic_tokenizer.tokenize_file(f, input_file_contains_escaped_chars=True)
+        with open(destination_filepath, "wb") as file:
+            file.write(bytearray(tokenized_result))
+
+
+def add_file(
+    image: dfsimage.Image,
+    input_file: Path | str,
+    dfs: str,
+    load_addr: int,
+    exec_addr: int,
+    locked: bool = True,
+) -> None:
+    \"\"\"Add a file to a DFS disk image.
+
+    Args:
+        image: The DFS image to add the file to.
+        input_file: Path to the file to add.
+        dfs: DFS filename (e.g. '$.TEMPEST').
+        load_addr: Memory address where the file should be loaded.
+        exec_addr: Memory address to execute from.
+        locked: Whether the file should be locked.
+    \"\"\"
+    image.import_files(
+        os_files=str(input_file),
+        dfs_names=dfs,
+        ignore_access=True,
+        inf_mode=dfsimage.InfMode.NEVER,
+        load_addr=load_addr,
+        exec_addr=exec_addr,
+        locked=locked,
+        replace=True,
+    )
 
 # Make build/disc directory
-os.makedirs(os.path.join(script_dir, "build", "disc"), exist_ok=True)
+(script_dir / "build" / "disc").mkdir(parents=True, exist_ok=True)
 """
 
     # Process each file, creating a control script for each binary we need to deal with
@@ -468,12 +559,9 @@ os.makedirs(os.path.join(script_dir, "build", "disc"), exist_ok=True)
 
                 # Convert to BASIC II format on disc
                 build_script += f'\n# Create BASIC file {bbc_file.bbc_filepath}\n'
-                build_script += f'source_filepath = os.path.join(script_dir, "source", "{os.path.basename(bbc_file.source_filepath)}")\n'
-                build_script += f'destination_filepath = os.path.join(script_dir, "build", "disc", "{os.path.basename(bbc_file.host_filepath)}")\n'
-                build_script += f'with open(source_filepath, "rb") as f:\n'
-                build_script += f'    tokenized_result = bbc_basic_tokenizer.tokenize_file(f, input_file_contains_escaped_chars=True)\n'
-                build_script += f'    with open(destination_filepath, "wb") as file:\n'
-                build_script += f'        file.write(bytearray(tokenized_result))\n'
+                build_script += f'source_filepath = script_dir / "source" / "{os.path.basename(bbc_file.source_filepath)}"\n'
+                build_script += f'destination_filepath = script_dir / "build" / "disc" / "{os.path.basename(bbc_file.host_filepath)}"\n'
+                build_script += f'tokenize_basic(source_filepath, destination_filepath)\n'
                 # Create INF for destination file
                 build_script += f'make_inf(destination_filepath, "{bbc_file.bbc_filepath}", 0x{bbc_file.load_address:08x}, 0x{bbc_file.exec_address:08x}, "{"L" if bbc_file.locked else ""}")\n'
 
@@ -484,8 +572,8 @@ os.makedirs(os.path.join(script_dir, "build", "disc"), exist_ok=True)
                     fh.write(content.replace(b'\x0d', os.linesep.encode()))
 
                 build_script += f'\n# Create text file {bbc_file.bbc_filepath}\n'
-                build_script += f'destination_filepath = os.path.join(script_dir, "build", "disc", "{os.path.basename(bbc_file.host_filepath)}")\n'
-                build_script += f'copy_text_to_bbc(os.path.join(script_dir, "source", "{os.path.basename(bbc_file.source_filepath)}"), destination_filepath)\n'
+                build_script += f'destination_filepath = script_dir / "build" / "disc" / "{os.path.basename(bbc_file.host_filepath)}"\n'
+                build_script += f'copy_text_to_bbc(script_dir / "source" / "{os.path.basename(bbc_file.source_filepath)}", destination_filepath)\n'
                 build_script += f'make_inf(destination_filepath, "{bbc_file.bbc_filepath}", 0x{bbc_file.load_address:08x}, 0x{bbc_file.exec_address:08x}, "{"L" if bbc_file.locked else ""}")\n'
 
             else:
@@ -528,7 +616,7 @@ py_dir = os.path.dirname(os.path.abspath(__file__))
 
                 # Execute the control file (calls py8dis to create the assembly file)
                 build_script += f'\n# Create disassembly {bbc_file.bbc_filepath}\n'
-                build_script += f'destination_filepath = os.path.join(script_dir, "build", "disc", "{os.path.basename(bbc_file.host_filepath)}")\n'
+                build_script += f'destination_filepath = script_dir / "build" / "disc" / "{os.path.basename(bbc_file.host_filepath)}"\n'
                 asm_file = f"{os.path.basename(bbc_file.host_filepath)}_{config.assembler}.asm"
                 build_script += f'disassemble("{os.path.basename(control_filepath)}", "{asm_file}")\n'
 
@@ -539,7 +627,7 @@ py_dir = os.path.dirname(os.path.abspath(__file__))
 
     # Create disc image
     build_script += f'\n# Create {config.extension}\n'
-    build_script += f'with dfsimage.Image.create("{os.path.splitext(os.path.basename(config.ssd_filepath))[0]}_new.ssd") as image:\n'
+    build_script += f'with dfsimage.Image.create(str(script_dir / "{os.path.splitext(os.path.basename(config.ssd_filepath))[0]}_new.ssd")) as image:\n'
 
     # Add title and opt to each side
     side_index = 0
@@ -550,8 +638,9 @@ py_dir = os.path.dirname(os.path.abspath(__file__))
         side_index += 1
 
     # Add files
+    files_to_process.reverse()
     for bbc_file in files_to_process:
-        build_script += f"    add_file(image, os.path.join(script_dir, 'build', 'disc', '{os.path.basename(bbc_file.host_filepath)}'), '{bbc_file.bbc_filepath}', load_addr=0x{bbc_file.load_address:08x},  exec_addr=0x{bbc_file.exec_address:08x}, locked={bbc_file.locked})\n"
+        build_script += f"    add_file(image, script_dir / 'build' / 'disc' / '{os.path.basename(bbc_file.host_filepath)}', '{bbc_file.bbc_filepath}', load_addr=0x{bbc_file.load_address:08x}, exec_addr=0x{bbc_file.exec_address:08x}, locked={bbc_file.locked})\n"
 
     # Copy dfsimage
     shutil.copytree(os.path.join(script_dir, "dfsimage"), os.path.join(config.destination_folder, "dfsimage"), dirs_exist_ok=True)
