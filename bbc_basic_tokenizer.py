@@ -422,7 +422,7 @@ def _tokenize_linenum(reader: _Reader, writer: _Writer) -> bool:
         reader.next_char()
 
     writer.write(LINE_NUMBER_TOKEN)
-    writer.write((acc & 0xC000) >> 12 | (acc & 0xC0) >> 2 ^ 0x54)
+    writer.write((((acc & 0xC000) >> 12) | ((acc & 0xC0) >> 2)) ^ 0x54)
     writer.write((acc & 0x3F) | 0x40)
     writer.write((acc >> 8) | 0x40)
     return
