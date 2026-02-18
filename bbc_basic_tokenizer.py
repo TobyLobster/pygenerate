@@ -247,7 +247,22 @@ class _Reader:
                     if c == b'x':
                         d1hex = self.file.read(1)
                         d2hex = self.file.read(1)
-                        return int(d1hex+d2hex, 16)
+                        val = int(d1hex+d2hex, 16)
+                        # If the value is 0x0d or 0x0a then we have a CR or LF
+                        # *within* the bounds of a line. This is not possible
+                        # to enter from the BASIC prompt, but can be done via
+                        # poking in memory for example and the result is still
+                        # considered valid BASIC.
+                        # This occurs in some games where a REM statement has
+                        # binary data after it.
+                        # To help with parsing, we encode these as non-ASCII
+                        # values and only convert them back when writing the
+                        # file.
+                        if val == CR:
+                            val = ord('\u23CE')
+                        if val == LF:
+                            val = ord('\u2193')
+                        return val
             return ord(c)
         return None
 
@@ -318,7 +333,16 @@ class _Writer:
     def write(self, c: int | str) -> None:
         """Append a character or byte to the buffer."""
         if isinstance(c, str):
-            c = ord(c)
+            # When reading, if we found a CR or LF in the middle of a BASIC line, we
+            # temporarily preserved them as non-ASCII UTF-8 characters so they don't
+            # parse as the end of a line. Here we convert them back to regular CR
+            # and LF for writing to a file.
+            if c == '\u23CE':
+                c = CR
+            elif c == '\u2193':
+                c = LF
+            else:
+                c = ord(c)
         if self.length < len(self.buffer):
             self.buffer[self.length] = c
             self.length += 1
@@ -515,7 +539,6 @@ def _tokenize_line_contents(reader: _Reader, writer: _Writer) -> None:
         if _is_dot_digit(c):
             if c != '.' and tokenize_numbers:
                 _tokenize_linenum(reader, writer)
-
                 continue
             _skip_write(_is_dot_digit, reader, writer)
             start_of_line = False

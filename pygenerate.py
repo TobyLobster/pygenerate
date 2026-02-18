@@ -29,8 +29,8 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 # Character used to represent the pound sign in BBC Micro filenames
-BBC_POUND = "`"
-UNICODE_POUND = bytes((0xa3,)).decode("iso8859-1")
+BBC_POUND = chr(96)
+UNICODE_POUND = "\u00A3"
 
 # Standard load address for sideways ROMs
 SIDEWAYS_ROM_ADDRESS = 0x8000
@@ -66,8 +66,13 @@ class BBCMicroFile:
         self.length: int | None = None
         self.source_filepath: str | None = None
 
-    def has_valid_exec(self):
-        return (self.load_address != 0) and (self.exec_address >= self.load_address) and (self.exec_address < (self.load_address + self.length))
+    def has_valid_exec(self, basic_memory_ranges = []):
+        # Check the execution address is not within the range of BASIC code
+        for r in basic_memory_ranges:
+            if (self.exec_address >= r[0]) and (self.exec_address < (r[0] + r[1])):
+                return False
+        # Check the exec address is non-zero and within the range of the load address and length
+        return (self.load_address != 0) and (self.exec_address != 0) and (self.exec_address >= self.load_address) and (self.exec_address < (self.load_address + self.length))
 
 class Config:
     """Configuration settings for the pygenerate tool.
@@ -115,10 +120,28 @@ def safe_copy(source: str, destination: str) -> None:
     except IsADirectoryError:
         exit_with_message(-3, f"The source '{source}' is a directory, not a file.")
     except OSError as e:
-        exit_with_message(-4, f"An OS error occurred: {e.strerror}.")
+        exit_with_message(-4, f"An OS error occurred: {e.strerror or e}.")
     except TypeError:
         exit_with_message(-5, "Invalid type for source or destination path.")
 
+def safe_move(source: str, destination: str) -> None:
+    """Move a file or directory, exiting with an error message on failure."""
+    try:
+        shutil.move(source, destination)
+    except FileNotFoundError:
+        exit_with_message(-1, f"Could not find '{source}' to move to '{destination}'.")
+    except PermissionError:
+        exit_with_message(-2, f"Permission denied when accessing '{source}' or writing to '{destination}'.")
+    except IsADirectoryError:
+        # shutil.move can raise this if a file operation is attempted on a directory on some platforms
+        exit_with_message(-3, f"The source '{source}' is a directory, not a file.")
+    except shutil.Error as e:
+        # Raised by shutil.move for specific move-related errors (e.g., same file, cross-device issues)
+        exit_with_message(-4, f"Shutil error while moving: {e}")
+    except OSError as e:
+        exit_with_message(-5, f"An OS error occurred: {e.strerror or e}")
+    except TypeError:
+        exit_with_message(-6, "Invalid type for source or destination path.")
 
 def run_subprocess(args: list[str], error_message: str, cwd: str | None = None) -> bytes:
     """Execute a subprocess and return stdout, exiting on failure."""
@@ -137,13 +160,19 @@ def make_directory(directory: str) -> None:
     os.makedirs(directory, exist_ok=True)
 
 
-def list_files_without_inf_extension(dir_path: str) -> list[str]:
-    """Return paths to files in a directory that don't have a .inf extension."""
+def is_hidden(name: str) -> bool:
+    return name.startswith('.') and name not in ('.', '..')
+
+def list_files_without_extension(dir_path: str) -> list[str]:
+    """Return paths to files in a directory that don't have any extension."""
     return [
         os.path.join(dir_path, filename)
         for filename in os.listdir(dir_path)
-        if os.path.isfile(os.path.join(dir_path, filename))
+        if not is_hidden(filename)
+        and os.path.isfile(os.path.join(dir_path, filename))
         and not filename.lower().endswith('.inf')
+        and not filename.lower().endswith('.py')
+        and not filename.lower().endswith('.md')
     ]
 
 
@@ -152,10 +181,10 @@ def list_files_with_inf_extension(dir_path: str) -> list[str]:
     return [
         os.path.join(dir_path, filename)
         for filename in os.listdir(dir_path)
-        if os.path.isfile(os.path.join(dir_path, filename))
+        if not is_hidden(filename)
+        and os.path.isfile(os.path.join(dir_path, filename))
         and filename.lower().endswith('.inf')
     ]
-
 
 # Character mapping from BBC Micro to host filesystem
 _BBC_TO_HOST_CHAR_MAP = {
@@ -198,7 +227,7 @@ def convert_to_bbc_filename(host_filename: str) -> str:
     return result
 
 
-def disk_metadata(disk_path: str) -> list[tuple[str, int]]:
+def disc_metadata(disk_path: str) -> list[tuple[str, int]]:
     """Return a list of (title, boot_option) tuples for each side of a disk image."""
     with dfsimage.Image(disk_path) as img:
         return [(side.title, side.opt) for side in img.sides]
@@ -309,7 +338,7 @@ def show_usage() -> None:
     print("")
     print("USAGE: pygenerate <filepath to ssd> {--acme} {--beebasm}")
 
-def handle_code(bbc_file, control_directory, asm_file, has_basic):
+def handle_code(bbc_file, control_directory, asm_file, basic_memory_ranges):
     control_filepath = os.path.join(control_directory, os.path.basename(bbc_file.host_filepath) + ".py")
     host_filepath_relative_to_script = os.path.relpath(bbc_file.host_filepath, control_directory)
 
@@ -332,10 +361,12 @@ acorn.bbc()
     control_script += f'load(0x{bbc_file.load_address:04x}, "original/{os.path.basename(bbc_file.host_filepath)}", "6502")\n'
     if bbc_file.load_address == SIDEWAYS_ROM_ADDRESS:
         control_script += 'acorn.is_sideways_rom()\n'
-    if has_basic:
-        control_script += f'include_binary_file(0x{bbc_file.load_address:04x}, "build/{os.path.basename(bbc_file.host_filepath)}_basic")\n'
 
-    if bbc_file.has_valid_exec:
+    # TODO: Really only one range is supported atm
+    for r in basic_memory_ranges:
+        control_script += f'include_binary_file(0x{r[0]:04x}, "build/{os.path.basename(bbc_file.host_filepath)}_basic")\n'
+
+    if bbc_file.has_valid_exec(basic_memory_ranges):
         control_script += f'entry(0x{bbc_file.exec_address:04x}, "entry_point")\n'
     control_script += "\ngo()\n"
 
@@ -350,12 +381,7 @@ acorn.bbc()
     build_script += f'assemble("{asm_file}", "{os.path.basename(bbc_file.host_filepath)}")\n'
     return build_script
 
-def main(args: Sequence[str]) -> None:
-    """Main entry point for pygenerate.
-
-    Args:
-        args: Command-line arguments (excluding the script name).
-    """
+def parse_arguments(args: Sequence[str]) -> None:
     if len(args) == 0:
         show_usage()
         exit_with_message(0, "")
@@ -378,6 +404,14 @@ def main(args: Sequence[str]) -> None:
             config.loose_folder = make_absolute_filepath(args[i])
             config.destination_folder, config.extension = os.path.splitext(os.path.basename(config.loose_folder))
 
+def main(args: Sequence[str]) -> None:
+    """Main entry point for pygenerate.
+
+    Args:
+        args: Command-line arguments (excluding the script name).
+    """
+    parse_arguments(args)
+
     make_directory(config.destination_folder)
 
     original_directory  = os.path.join(config.destination_folder, "original")
@@ -396,36 +430,36 @@ def main(args: Sequence[str]) -> None:
         # Enumerate loose files (with or without a .inf file)
         disk_files = []
 
-        binary_filenames = list_files_without_inf_extension(config.loose_folder)
+        binary_filenames = list_files_without_extension(config.loose_folder)
         inf_filenames = list_files_with_inf_extension(config.loose_folder)
 
         for bin_file in binary_filenames:
-            # Copy file to original directory if needed
-            if config.loose_folder != original_directory:
-                safe_copy(os.path.join(config.loose_folder, bin_file),
-                          os.path.join(original_directory, bin_file))
+            # Move files to 'original' directory
+            destination = os.path.join(original_directory, os.path.basename(bin_file))
+            safe_move(bin_file, destination)
 
             # Copy associated .inf file too if needed
             if bin_file + ".inf" in inf_filenames:
-                # Copy file to original directory if needed
-                if config.loose_folder != original_directory:
-                    safe_copy(os.path.join(config.loose_folder, bin_file + ".inf"),
-                              os.path.join(original_directory, bin_file + ".inf"))
-
                 # Read info from the associated .inf file
                 bbc_file = read_inf(bin_file)
+
+                # Move INF file to 'original' directory
+                safe_move(bin_file + ".inf", destination + ".inf")
             else:
                 # Add a file without an associated .inf file
                 bbc_file = BBCMicroFile(bin_file, bbc_filepath = os.path.basename(bin_file))
+
+            # Update host filepath to the new location (after the safe.move)
+            bbc_file.host_filepath = destination
             files_to_process.append(bbc_file)
 
     if config.assembler == "acme":
         assemble = """args = ["acme", "--symbollist", symbols_filepath, "-r", report_filepath, "-o", str(binary_filepath_full), str(asm_filepath_full)]
-    run(args, "assembly failed", script_dir)"""
+    run_subprocess(args, "assembly failed", script_dir)"""
     elif config.assembler == "beebasm":
         assemble = """args = ["beebasm", "-o", str(binary_filepath_full), "-i", str(asm_filepath_full), "-v"]
 
-    report = run(args, "assembly failed", script_dir)
+    report = run_subprocess(args, "assembly failed", script_dir)
     with open(report_filepath, "wb") as f:
         f.write(report)"""
 
@@ -451,7 +485,7 @@ import dfsimage             # For writing BBC disk images
 # Get the full directory path of this script
 script_dir = Path(__file__).resolve().parent
 
-def run(args: list[str], error_message: str, cwd: Path | None = None) -> bytes:
+def run_subprocess(args: list[str], error_message: str, cwd: Path | None = None) -> bytes:
     \"\"\"Execute a subprocess and return stdout.
 
     Args:
@@ -482,7 +516,7 @@ def disassemble(python_filepath: str, asm_filepath: str) -> None:
     asm_filepath_full = script_dir / "source" / asm_filepath
 
     args = ["python3", str(python_filepath_full), "--beebasm", "--output", str(asm_filepath_full)]
-    run(args, "disassemble failed", script_dir)
+    run_subprocess(args, "disassemble failed", script_dir)
 
 
 def make_inf(binary_filepath: Path, bbc_bin_filename: str, load_address: int, exec_address: int, locked: str) -> None:
@@ -606,6 +640,9 @@ def add_file(
                 else:
                     print(f" as BASIC")
 
+                # We only support one BASIC snippet per file currently
+                basic_snippet = [(bbc_file.load_address, end_index)]
+
                 # Convert to BASIC II format on disc
                 build_script += f'\n# Create BASIC file {bbc_file.bbc_filepath}\n'
                 build_script += f'source_filepath = script_dir / "source" / "{os.path.basename(bbc_file.source_filepath)}"\n'
@@ -615,7 +652,7 @@ def add_file(
                     build_script += f'tokenize_basic(source_filepath, tokenized_basic)\n'
 
                     asm_file = f"{os.path.basename(bbc_file.host_filepath)}_{config.assembler}.asm"
-                    build_script += handle_code(bbc_file, control_directory, asm_file, True)
+                    build_script += handle_code(bbc_file, control_directory, asm_file, basic_snippet)
                 else:
                     build_script += f'tokenize_basic(source_filepath, destination_filepath)\n'
 
@@ -646,30 +683,37 @@ def add_file(
                 asm_file = f"{os.path.basename(bbc_file.host_filepath)}_{config.assembler}.asm"
                 build_script += f'\n# Create disassembly {bbc_file.bbc_filepath}\n'
                 build_script += f'destination_filepath = script_dir / "build" / "disc" / "{os.path.basename(bbc_file.host_filepath)}"\n'
-                build_script += handle_code(bbc_file, control_directory, asm_file, False)
+                build_script += handle_code(bbc_file, control_directory, asm_file, [])
 
                 # Create INF for destination file
                 build_script += f'make_inf(destination_filepath, "{bbc_file.bbc_filepath}", 0x{bbc_file.load_address:08x}, 0x{bbc_file.exec_address:08x}, "{"L" if bbc_file.locked else ""}")\n'
 
     # Create disc image
     build_script += f'\n# Create {config.extension}\n'
-    build_script += f'with dfsimage.Image.create(str(script_dir / "{os.path.splitext(os.path.basename(config.ssd_filepath))[0]}_new.ssd")) as image:\n'
+    if config.ssd_filepath:
+        ssd_title = os.path.splitext(os.path.basename(config.ssd_filepath))[0]
+    else:
+        ssd_title = os.path.basename(config.destination_folder)
 
-    # Add title and opt to each side
-    side_index = 0
-    sides_metadata = disk_metadata(config.ssd_filepath)
-    for side in sides_metadata:
-        build_script += f"    image.sides[{side_index}].title = '{side[0]}'\n"
-        build_script += f"    image.sides[{side_index}].opt = {side[1]}\n"
-        side_index += 1
+    build_script += f'with dfsimage.Image.create(str(script_dir / "{ssd_title}_new.ssd")) as image:\n'
+
+    # Add title and opt to each side, based on original SSD
+    if config.ssd_filepath:
+        side_index = 0
+        sides_metadata = disc_metadata(config.ssd_filepath)
+        for side in sides_metadata:
+            build_script += f"    image.sides[{side_index}].title = '{side[0]}'\n"
+            build_script += f"    image.sides[{side_index}].opt = {side[1]}\n"
+            side_index += 1
 
     # Add files
     files_to_process.reverse()
     for bbc_file in files_to_process:
         build_script += f"    add_file(image, script_dir / 'build' / 'disc' / '{os.path.basename(bbc_file.host_filepath)}', '{bbc_file.bbc_filepath}', load_addr=0x{bbc_file.load_address:08x}, exec_addr=0x{bbc_file.exec_address:08x}, locked={bbc_file.locked})\n"
 
-    # Copy dfsimage
+    # Copy dfsimage and basic tokenizer
     shutil.copytree(os.path.join(script_dir, "dfsimage"), os.path.join(config.destination_folder, "dfsimage"), dirs_exist_ok=True)
+    safe_copy(os.path.join(script_dir, "bbc_basic_tokenizer.py"), os.path.join(config.destination_folder, "bbc_basic_tokenizer.py"))
 
     # Write the build script
     with open(os.path.join(config.destination_folder, "build.py"), "w") as fh:

@@ -121,6 +121,10 @@ def decode_basic(file_data: bytes, output_file_should_escape_chars: bool = True,
             return listing, i, False
         i += 1
 
+        if i == file_length:
+            listing_append(listing, "Bad Program (expected FF terminator).")
+            return listing, i, False
+
         # Line number high byte. 0xFF marks end of program
         if file_data[i] == 0xFF:
             i += 1
@@ -149,13 +153,28 @@ def decode_basic(file_data: bytes, output_file_should_escape_chars: bool = True,
 
         # Decode the line content
         in_quotes = False
+        in_rem_or_data = False
         decoded = []
 
         while i < line_end:
             byte = file_data[i]
 
-            if in_quotes:
+            if in_quotes or in_rem_or_data:
                 # Inside quotes, output characters literally
+                #
+                # We also choose not to detokenize inside a REM or DATA statement.
+                # This is an unusual case. If entered at the BASIC prompt, anything
+                # after REM or DATA doesn't get tokenized. So 10REMPRINT has
+                # a token for REM, but the letters of PRINT are encoded as five ASCII
+                # characters.
+                #
+                # So when we detokenize, if we find a BASIC program with a token byte
+                # inside a REM or DATA it was put there by alternative means, such as
+                # poking memory. We preserve these token bytes as bytes so that if it
+                # gets re-tokenized again, the original bytes are restored. This
+                # occurs in games sometimes where a REM statement has a short amount
+                # of machine code or data in it. (See file '$.HEADER' in the game
+                # 'Rat Catcher' for an example, https://bbcmicro.co.uk/game.php?id=4332 ).
                 decoded.append(byte)
             elif byte == 0x8D:
                 # Encoded line number token
@@ -181,6 +200,10 @@ def decode_basic(file_data: bytes, output_file_should_escape_chars: bool = True,
             # Toggle quote state
             if chr(byte) == '"':
                 in_quotes = not in_quotes
+
+            # Set boolean true if starting a REM or DATA statement
+            if (byte == 244) or (byte == 220) and not in_quotes:
+                in_rem_or_data = True
 
             i += 1
 
