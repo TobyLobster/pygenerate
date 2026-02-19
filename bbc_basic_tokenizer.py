@@ -624,7 +624,10 @@ def tokenize_line(reader: _Reader, writer: _Writer, previous_line_number: int, t
     # Create a line number if none present
     if saw_digit:
         if line_number <= previous_line_number:
-            raise TokenizeError(reader.line_number(), "Line numbers must increase")
+            # I treat this as a warning, as there are files out there whose line numbers
+            # are in the wrong order and we want to be able to recreate them from ASCII.
+            #raise TokenizeError(reader.line_number(), "Line numbers must increase")
+            print(f"WARNING: Line numbers are not in order: line {line_number} occurs after line {previous_line_number}.")
     else:
         line_number = previous_line_number + 1 if previous_line_number >= 0 else 1
     previous_line_number = line_number
@@ -642,7 +645,8 @@ def tokenize_line(reader: _Reader, writer: _Writer, previous_line_number: int, t
         raise TokenizeError(reader.line_number(), "Line too long after tokenizing")
 
     # Add the tokenized line to the tokenized data
-    if writer.length > 4:
+    # Length four is an empty line, but happens, e.g. In $.MENU of in Revs 4 Tracks ( https://bbcmicro.co.uk/game.php?id=1128 )
+    if writer.length >= 4:
         tokenized.extend(writer.data())
 
     return previous_line_number
