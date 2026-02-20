@@ -20,12 +20,15 @@ import errno
 import sys
 from enum import IntFlag
 from typing import BinaryIO
+from collections import deque
 
 # Character constants
 CR = 0x0D
 LF = 0x0A
 LINE_NUMBER_TOKEN = 0x8D
 
+global cached_chars
+cached_chars = deque()
 
 class KeywordFlags(IntFlag):
     """Flags controlling how keywords are tokenized.
@@ -218,6 +221,16 @@ _keyword_list = [
     _Keyword("HIMEM",       0xD3, KeywordFlags.NONE),
 ]
 
+def get_token_from_keyword_string(keyword: str):
+    keyword = keyword.upper()
+    for key in _keyword_list:
+        if key.name == keyword:
+            return key.token
+        if key.name + "-LHS" == keyword:
+            return key.token + 0x40
+        if key.name + "-RHS" == keyword:
+            return key.token
+    return None
 
 class _Reader:
     """Buffered character reader that normalizes line endings.
@@ -235,9 +248,29 @@ class _Reader:
         self.errno = 0
         self.previous_char_was_cr = False
         self.next_char()
+        self.dont_tokenize = False
 
-    def read_one_char(self) -> int | None:
-        """Read a single byte from the file."""
+    def read_one_char(self) -> (int, bool) | (None, None):
+        """Read a single byte from the file. It also handles escaped 
+        expressions like:
+
+            \\x8f        (for binary values)
+            \\{ELSE}     (which forces tokenization) or 
+            \\{TIME-LHS} (which forces the left hand side token, for pseudo-variables)
+            \\{"IF"}     (which forces no tokenization).
+        
+        The return value is a tuple of the character read, and the 'dont_tokenize' 
+        boolean value."""
+
+        global cached_chars
+
+        # Cached chars are used for the \{"IF"} style of escaped expression.
+        # The I and F are returned on each call along with the boolean value
+        # True, meaning don't tokenize these letters.
+        if cached_chars:
+            c = cached_chars.popleft()
+            return (ord(c), True)
+
         c = self.file.read(1)
         if c:
             # Characters can be escaped as "\x0a" etc, handle this as needed
@@ -262,9 +295,41 @@ class _Reader:
                             val = ord('\u23CE')
                         if val == LF:
                             val = ord('\u2193')
-                        return val
-            return ord(c)
-        return None
+                        return (val, True)
+                    elif c == b'{':
+                        c = self.file.read(1)
+                        if c == b'"':
+                            # ASCII characters to be encoded without tokenization
+                            # e.g. \{"IF"}
+                            while c:
+                                c = self.file.read(1)
+                                if c == b'"':
+                                    c = self.file.read(1)
+                                    if c == b'}':
+                                        if cached_chars:
+                                            c = cached_chars.popleft()
+                                            return(ord(c), True)
+                                elif c is not None:
+                                    cached_chars.append(c)
+                            if c is None:
+                                raise TokenizeError(self.line_number(), f"Unfinished escaped string")
+                        else:
+                            # To be encoded as a token even if it wouldn't normally be
+                            # e.g. \{PRINT} or \{TIME-LHS}
+                            keyword_string = ""
+                            while c:
+                                if c == b'}':
+                                    c = get_token_from_keyword_string(keyword_string)
+                                    if c is None:
+                                        raise TokenizeError(self.line_number(), f"Escaped token '{keyword_string}' is not known")
+                                    return (c, False)
+                                keyword_string += chr(ord(c))
+                                c = self.file.read(1)
+                            if c is None:
+                                raise TokenizeError(self.line_number(), f"Unfinished escaped token '{keyword_string}'")
+            if c:
+                return (ord(c), False)
+        return (None, False)
 
     def line_number(self) -> int:
         """Return the current source line number."""
@@ -286,11 +351,11 @@ class _Reader:
             if self.end:
                 return
             self.line += 1
-        next_char = self.read_one_char()
+        next_char, dont_tokenize = self.read_one_char()
 
         # Skip over LF if CR was previous character (handle CRLF)
         if self.previous_char_was_cr and next_char == LF:
-            next_char = self.read_one_char()
+            next_char, dont_tokenize = self.read_one_char()
         if next_char is None:
             if self.file.readable():
                 self.errno = errno.errorcode
@@ -303,6 +368,7 @@ class _Reader:
         else:
             self.previous_char_was_cr = (next_char == CR)
             self.current = next_char
+        self.dont_tokenize = dont_tokenize
 
 
 class _Writer:
@@ -443,28 +509,29 @@ def _parse_keyword(reader: _Reader, writer: _Writer) -> _Keyword | None:
     match_count = 0
     match_name = None
 
-    for keyword in _keyword_list:
-        if not match_count or (match_count <= len(keyword.name) and match_name[:match_count] == keyword.name[:match_count]):
-            while (match_count < len(keyword.name) and
-                   reader.current_char() == keyword.name[match_count]):
-                reader.next_char()
-                match_count += 1
-
-            if match_count:
-                if match_count == len(keyword.name):
-                    if keyword.flags & KeywordFlags.C:
-                        if _is_alpha_digit(reader.current_char()):
-                            for i in range(match_count):
-                                writer.write(ord(keyword.name[i]))
-                            _skip_write(_is_alpha_digit, reader, writer)
-                            return None
-                    return keyword
-
-                if reader.current_char() == '.':
+    if not reader.dont_tokenize:
+        for keyword in _keyword_list:
+            if not match_count or (match_count <= len(keyword.name) and match_name[:match_count] == keyword.name[:match_count]):
+                while (match_count < len(keyword.name) and
+                       reader.current_char() == keyword.name[match_count]):
                     reader.next_char()
-                    return keyword
-
-                match_name = keyword.name
+                    match_count += 1
+    
+                if match_count:
+                    if match_count == len(keyword.name):
+                        if keyword.flags & KeywordFlags.C:
+                            if _is_alpha_digit(reader.current_char()):
+                                for i in range(match_count):
+                                    writer.write(ord(keyword.name[i]))
+                                _skip_write(_is_alpha_digit, reader, writer)
+                                return None
+                        return keyword
+    
+                    if reader.current_char() == '.':
+                        reader.next_char()
+                        return keyword
+    
+                    match_name = keyword.name
 
     if match_count:
         for i in range(match_count):
@@ -666,11 +733,14 @@ def tokenize_file(file: BinaryIO, input_file_contains_escaped_chars: bool = True
         TokenizeError: If tokenization fails (e.g., line too long,
             line numbers out of order or out of range).
     """
+    global cached_chars
+
     reader = _Reader(file, input_file_contains_escaped_chars)
     previous_line_number = -1
     writer = _Writer()
 
     tokenized: list[int] = []
+    cached_chars = deque()
     while not reader.is_end():
         previous_line_number = tokenize_line(reader, writer, previous_line_number, tokenized)
 
