@@ -26,9 +26,7 @@ from collections import deque
 CR = 0x0D
 LF = 0x0A
 LINE_NUMBER_TOKEN = 0x8D
-
-global cached_chars
-cached_chars = deque()
+MAX_LINE_LENGTH = 255
 
 class KeywordFlags(IntFlag):
     """Flags controlling how keywords are tokenized.
@@ -221,7 +219,9 @@ _keyword_list = [
     _Keyword("HIMEM",       0xD3, KeywordFlags.NONE),
 ]
 
-def get_token_from_keyword_string(keyword: str):
+def get_token_from_keyword_string(keyword: str) -> int | None:
+    """Given a string, look it up as a keyword and return the token value, or None if not found."""
+    
     keyword = keyword.upper()
     for key in _keyword_list:
         if key.name == keyword:
@@ -247,10 +247,11 @@ class Reader:
         self.end = False
         self.errno = 0
         self.previous_char_was_cr = False
-        self.next_char()
+        self._cached_chars: deque[bytes] = deque()
         self.dont_tokenize = False
+        self.next_char()
 
-    def read_one_char(self) -> (int, bool) | (None, None):
+    def read_one_char(self) -> tuple[int | None, bool]:
         """Read a single byte from the file. It also handles escaped 
         expressions like:
 
@@ -262,17 +263,15 @@ class Reader:
         The return value is a tuple of the character read, and the 'dont_tokenize' 
         boolean value."""
 
-        global cached_chars
-
         # Cached chars are used for the \{"IF"} style of escaped expression.
         # The I and F are returned on each call along with the boolean value
         # True, meaning don't tokenize these letters.
-        if cached_chars:
-            c = cached_chars.popleft()
+        if self._cached_chars:
+            c = self._cached_chars.popleft()
             return (ord(c), True)
 
         c = self.file.read(1)
-        if c:
+        if c is not None:
             # Characters can be escaped as "\x0a" etc, handle this as needed
             if self.contains_escaped_characters:
                 if c == b'\\':
@@ -306,11 +305,11 @@ class Reader:
                                 if c == b'"':
                                     c = self.file.read(1)
                                     if c == b'}':
-                                        if cached_chars:
-                                            c = cached_chars.popleft()
+                                        if self._cached_chars:
+                                            c = self._cached_chars.popleft()
                                             return(ord(c), True)
                                 elif c is not None:
-                                    cached_chars.append(c)
+                                    self._cached_chars.append(c)
                             if c is None:
                                 raise TokenizeError(self.line_number(), f"Unfinished escaped string")
                         else:
@@ -323,7 +322,7 @@ class Reader:
                                     if c is None:
                                         raise TokenizeError(self.line_number(), f"Escaped token '{keyword_string}' is not known")
                                     return (c, False)
-                                keyword_string += chr(ord(c))
+                                keyword_string += c.decode("ascii")
                                 c = self.file.read(1)
                             if c is None:
                                 raise TokenizeError(self.line_number(), f"Unfinished escaped token '{keyword_string}'")
@@ -379,7 +378,7 @@ class Writer:
     """
 
     def __init__(self):
-        self.buffer = bytearray(255)
+        self.buffer = bytearray(MAX_LINE_LENGTH)
         self.length = 0
         self.fail = False
 
@@ -457,7 +456,7 @@ def _is_hex_digit(c: str) -> bool:
     return ('A' <= c <= 'F') or _is_digit(c)
 
 
-def _tokenize_linenum(reader: Reader, writer: Writer) -> bool:
+def _tokenize_linenum(reader: Reader, writer: Writer) -> None:
     """Tokenize a line number reference (e.g., in GOTO/GOSUB).
 
     Line numbers are encoded as 3 bytes after the LINE_NUMBER_TOKEN.
@@ -632,7 +631,6 @@ def tokenize_line_contents(reader: Reader, writer: Writer) -> None:
             flags = keyword.flags
 
             if (flags & KeywordFlags.C) and _is_alpha_digit(reader.current_char()):
-                assert False
                 start_of_line = False
                 tokenize_numbers = False
                 continue
@@ -671,7 +669,7 @@ def tokenize_line(reader: Reader, writer: Writer, previous_line_number: int, tok
         tokenized: List to store the output bytes
 
     Returns:
-        A list of bytes representing the tokenized BASIC program.
+        The previous line number
 
     Raises:
         TokenizeError: If tokenization fails (e.g., line too long,
@@ -737,14 +735,11 @@ def tokenize_file(file: BinaryIO, input_file_contains_escaped_chars: bool = True
         TokenizeError: If tokenization fails (e.g., line too long,
             line numbers out of order or out of range).
     """
-    global cached_chars
-
     reader = Reader(file, input_file_contains_escaped_chars)
     previous_line_number = -1
     writer = Writer()
 
     tokenized: list[int] = []
-    cached_chars = deque()
     while not reader.is_end():
         previous_line_number = tokenize_line(reader, writer, previous_line_number, tokenized)
 
@@ -754,33 +749,30 @@ def tokenize_file(file: BinaryIO, input_file_contains_escaped_chars: bool = True
 
     return tokenized
 
-
 def main(args: list[str]) -> None:
-    """Main entry point for command-line tokenization."""
+    parser = argparse.ArgumentParser(
+        description="Converts detokenized ASCII BASIC source code into tokenized BBC BASIC II format."
+    )
+    parser.add_argument("input_file",  help="Input ASCII BASIC source file")
+    parser.add_argument("output_file", help="Output tokenized BASIC file")
+    parser.add_argument(
+        "--no_escape",
+        action="store_true",
+        help='Disable conversion to escaped strings like "\\x07"'
+    )
+
+    parsed = parser.parse_args(args)
+
+    input_file_contains_escaped_chars = not parsed.no_escape
+
     try:
-        with open(args[0], "rb") as f:
-            input_file_contains_escaped_chars = True
-
-            if "--no_escape" in args:
-                args.remove("--no_escape")
-                input_file_contains_escaped_chars = False
-
+        with open(parsed.input_file, "rb") as f:
             tokenized_result = tokenize_file(f, input_file_contains_escaped_chars)
-            with open(args[1], 'wb') as file:
-                file.write(bytearray(tokenized_result))
+        with open(parsed.output_file, "wb") as f:
+            f.write(bytearray(tokenized_result))
     except TokenizeError as e:
         print(e)
-    except IndexError:
-        print("BBC BASIC II tokenizer.")
-        print("")
-        print("Converts detokenized ASCII BASIC source code into tokenized BBC BASIC II format.")
-        print("")
-        print('By default, if the input contains an escaped character string such as "\\x07" this is converted back to the single character equivalent.')
-        print('To disable this behaviour add the "--no_escape" argument.')
-        print("")
-        print("Usage: python3 bbc_basic_tokenizer.py <input_text_file> <output_tokenized_file> {--no_escape}")
-        exit(1)
-
+        sys.exit(1)
 
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    main(sys.argv)

@@ -10,6 +10,12 @@ To override this behaviour, add the "--no_escape" argument. This allows non-prin
 
 Based on the PD JavaScript version at https://github.com/shawty/BBCB_DFS_Catalog/blob/master/dfscat.js
 which was based on the original list.pl code from MMB_Utils https://github.com/sweharris/MMB_Utils
+
+The public functions are:
+
+    decode_basic_file   - give it a filepath of a BASIC program to detokenize
+    decode_basic        - give it bytes in memory of a BASIC program to detokenize
+    
 """
 import sys
 from io import BytesIO
@@ -81,48 +87,43 @@ TOKENS = {
     190: 'GET$',     254: 'WIDTH',
     191: 'INKEY$',   255: 'OSCLI',
 }
+LINE_START_BYTE     = 0x0D      # CR
+END_OF_PROGRAM      = 0xFF
+ENCODED_LINE_NUMBER = 0x8D
+TOKEN_REM           = 0xF4      # 244
+TOKEN_DATA          = 0xDC      # 220
+BACKSLASH           = 0x5C      # 92
 
 # Create the reverse dictionary, keywords to tokens
-TOKENS_REV = {}
-for key, value in TOKENS.items():
-    if value in TOKENS_REV:
-        # keep the lower numeric key
-        TOKENS_REV[value] = min(TOKENS_REV[value], key)
-    else:
-        TOKENS_REV[value] = key
-
+TOKENS_REV = {v: k for k, v in reversed(TOKENS.items())}
 TOKENS_REV_NAMES = [s.encode("ascii") for s in TOKENS_REV]
 
 # List of tokens for pseudo-variables (LHS versions): LOMEM, HIMEM, PAGE, PTR, TIME
-pseudo_variables_lhs = [207, 208, 209, 210, 211]
+PSEUDO_VARIABLES_LHS = frozenset([207, 208, 209, 210, 211])
 
-def escape(number: int, output_file_should_escape_chars: bool) -> list:
+def escape(byte_value: int, escape_non_printable: bool) -> list:
     """If escapes are required, then change a backslash to a double backslash 
     and any non-printable characters to \xFF format"""
-    if number == 92:
-        if not output_file_should_escape_chars:
-            return [92]
+    if byte_value == BACKSLASH:
+        if not escape_non_printable:
+            return [BACKSLASH]
         # A backslash character normally signifies the start of a markup e.g. \{TAB},
         # but here we are just trying to use a regular backslash in our program,
         # so we encode it as double backslash.
-        return [92, 92]
-    elif 32 <= number < 127:
+        return [BACKSLASH, BACKSLASH]
+    elif 32 <= byte_value < 127:
         # Printable ASCII
-        return [number]
+        return [byte_value]
     else:
-        if not output_file_should_escape_chars:
-            return [number]
+        if not escape_non_printable:
+            return [byte_value]
         # Non-printable -> hex escape like '\xHH'
-        return [ord(ch) for ch in f'\\x{number:02x}']
+        return [ord(ch) for ch in f'\\x{byte_value:02x}']
 
-def convert_to_string(int_list: list(int)) -> str:
+def ints_to_str(int_list: list[int]) -> str:
     """Convert a list of integers into a string with the ASCII encoding"""
     return ''.join(chr(i) for i in int_list)
     
-def listing_append(listing, data_to_add):
-    """Append data to the listing"""
-    listing.append(data_to_add)
-
 def endswith_list(lst, sub):
     """Does the list end with the sub-list?"""
     if not sub:
@@ -131,9 +132,9 @@ def endswith_list(lst, sub):
         return False
     return lst[-len(sub):] == sub
 
-def list_of_ascii_bytes(string: str) -> list(bytes):
+def list_of_ascii_bytes(s: str) -> list[bytes]:
     """Convert a string into a list of integers"""
-    return list(bytes(string, encoding="ascii"))
+    return bytes(s.encode("ascii"))
 
 def round_trip_works(line: list, new_bit: list, expected_ending: list):
     """'line' extended with 'new_bit' is an ASCII string supplied as a list 
@@ -145,9 +146,7 @@ def round_trip_works(line: list, new_bit: list, expected_ending: list):
     writer = bbt.Writer()
     bbt.tokenize_line_contents(reader, writer)
     result = list(writer.data())
-    if endswith_list(result, expected_ending):
-        return True
-    return False
+    return endswith_list(result, expected_ending)
 
 def decode_basic(file_data: bytes, output_file_should_escape_chars: bool = True, start_index: int = 0) -> tuple[list, int, bool]:
     """
@@ -170,22 +169,22 @@ def decode_basic(file_data: bytes, output_file_should_escape_chars: bool = True,
 
     while i < file_length:
         # Each line starts with CR (13)
-        if file_data[i] != 13:
-            listing_append(listing, "Bad Program (expected ^M at start of line).")
+        if file_data[i] != LINE_START_BYTE:
+            listing.append("Bad Program (expected ^M at start of line).")
             return listing, i, False
         i += 1
 
         if i == file_length:
-            listing_append(listing, "Bad Program (expected FF terminator).")
+            listing.append("Bad Program (expected FF terminator).")
             return listing, i, False
 
         # Line number high byte. 0xFF marks end of program
-        if file_data[i] == 0xFF:
+        if file_data[i] == END_OF_PROGRAM:
             i += 1
             return listing, i, True
 
         if i > (file_length - 3):
-            listing_append(listing, "Bad Program (Line finishes before metadata).")
+            listing.append("Bad Program (Line finishes before metadata).")
             return listing, i, False
 
         # Line number (big-endian)
@@ -197,12 +196,12 @@ def decode_basic(file_data: bytes, output_file_should_escape_chars: bool = True,
         i += 1
 
         if line_len < 0:
-            listing_append(listing, "Bad Program (Line length too short)")
+            listing.append("Bad Program (Line length too short)")
             return listing, i, False
 
         line_end = i + line_len
         if line_end > file_length:
-            listing_append(listing, "Bad Program (Line truncated)")
+            listing.append("Bad Program (Line truncated)")
             return listing, i, False
 
         # Decode the line content
@@ -230,7 +229,7 @@ def decode_basic(file_data: bytes, output_file_should_escape_chars: bool = True,
                 # of machine code or data in it. (See file '$.HEADER' in the game
                 # 'Rat Catcher' for an example, https://bbcmicro.co.uk/game.php?id=4332 ).
                 decoded.extend(escape(byte, output_file_should_escape_chars))
-            elif byte == 0x8D:
+            elif byte == ENCODED_LINE_NUMBER:
                 # Encoded line number token
                 # Decode using algorithm from "The BASIC ROM User Guide" page 41
                 if (i + 3) >= line_end:
@@ -268,15 +267,15 @@ def decode_basic(file_data: bytes, output_file_should_escape_chars: bool = True,
                 token_string_marked_up = list_of_ascii_bytes('\\{' + TOKENS[byte] + '}')
                 token_string_marked_up_lhs = list_of_ascii_bytes('\\{' + TOKENS[byte] + '-LHS}')
                 
-                if round_trip_works(decoded, token_string, list([byte])):
+                if round_trip_works(decoded, token_string, [byte]):
                     decoded.extend(token_string)
-                elif round_trip_works(decoded, token_string_marked_up, list([byte])):
+                elif round_trip_works(decoded, token_string_marked_up, [byte]):
                     decoded.extend(token_string_marked_up)
-                elif (byte in pseudo_variables_lhs) and round_trip_works(decoded, token_string_marked_up_lhs, list([byte])):
+                elif (byte in PSEUDO_VARIABLES_LHS) and round_trip_works(decoded, token_string_marked_up_lhs, [byte]):
                     decoded.extend(token_string_marked_up_lhs)
                 else:
                     # Error out
-                    listing_append(listing, f"ERROR: Could not detokenize {byte} and get a valid round trip")
+                    listing.append(f"ERROR: Could not detokenize {byte} and get a valid round trip")
                     return listing, i, False
             else:
                 # Acornsoft Reversi (https://bbcmicro.co.uk/game.php?id=4463) has 
@@ -306,7 +305,7 @@ def decode_basic(file_data: bytes, output_file_should_escape_chars: bool = True,
                             # Error out
                             decoded.extend(token_string_quoted_marked_up)
                             i += len(match)-1
-                            listing_append(listing, f"ERROR: Could not detokenize {byte} and get a valid round trip")
+                            listing.append(f"ERROR: Could not detokenize {byte} and get a valid round trip")
                             return listing, i, False
                 else:
                     # No potential keyword found. Output a regular character.
@@ -317,19 +316,19 @@ def decode_basic(file_data: bytes, output_file_should_escape_chars: bool = True,
                 in_quotes = not in_quotes
 
             # Set boolean true if starting a REM or DATA statement
-            if (byte == 244) or (byte == 220) and not in_quotes:
+            if ((byte == TOKEN_REM) or (byte == TOKEN_DATA)) and not in_quotes:
                 in_rem_or_data = True
 
             i += 1
 
         if output_file_should_escape_chars:
-            decoded = convert_to_string(decoded)
-            listing_append(listing, f"{line_number:6d}{decoded}\n")
+            decoded = ints_to_str(decoded)
+            listing.append(f"{line_number:6d}{decoded}\n")
         else:
             decoded = bytes(f"{line_number:6d}", encoding='ascii') + bytes(decoded) + bytes("\n", encoding='ascii')
-            listing_append(listing, decoded)
+            listing.append(decoded)
 
-    listing_append(listing, "Bad program (file ends without FF terminator)")
+    listing.append("Bad program (file ends without FF terminator)")
     return listing, i, False
 
 def decode_basic_file(filepath: str, output_file_should_escape_chars: bool) -> tuple[list, bool]:
@@ -338,6 +337,9 @@ def decode_basic_file(filepath: str, output_file_should_escape_chars: bool) -> t
 
     Args:
         filepath: Path to the tokenized BASIC file.
+        output_file_should_escape_chars:  When True, converts unprintable characters to ASCII with markup
+                                          Rather than 8 bit characters. This also allows the file
+                                          to be re-tokenized preserving the original binary.
 
     Returns:
         A tuple of (listing, success).
@@ -349,39 +351,37 @@ def decode_basic_file(filepath: str, output_file_should_escape_chars: bool) -> t
 
 
 def main(args: list[str]) -> None:
-    """Main entry point for command-line tokenization."""
-    if len(args) < 2:
-        print('BBC BASIC II detokenizer.', file=sys.stderr)
-        print('', file=sys.stderr)
-        print('Converts a tokenized BBC BASIC II file into detokenized ASCII BASIC source code.', file=sys.stderr)
-        print('', file=sys.stderr)
-        print('By default, unprintable characters are converted to "\\x07" style strings to give a pure ASCII result.', file=sys.stderr)
-        print('To override this behaviour, add the "--no_escape" argument. In this case, non-printable characters will be output as raw binary.', file=sys.stderr)
-        print('', file=sys.stderr)
-        print("Usage: python3 bbc_basic_detokenizer.py <input_tokenized_file> <output_text_file> {--no_escape}", file=sys.stderr)
-        sys.exit(1)
+    parser = argparse.ArgumentParser(
+        description="Converts tokenized BASIC file into detokenized ASCII BASIC format."
+    )
+    parser.add_argument("input_file",  help="Input tokenized BASIC file")
+    parser.add_argument("output_file", help="Output detokenized ASCII file")
+    parser.add_argument(
+        "--no_escape",
+        action="store_true",
+        help='Disable conversion of non-printables to escaped strings like "\\x07"'
+    )
 
-    output_file_should_escape_chars = True
-    if "--no_escape" in args:
-        args.remove("--no_escape")
-        output_file_should_escape_chars = False
+    parsed = parser.parse_args(args)
 
-    listing, end_index, success = decode_basic_file(args[0], output_file_should_escape_chars)
+    output_file_should_escape_chars = not parsed.no_escape
+
+    listing, end_index, success = decode_basic_file(parsed.input_file, output_file_should_escape_chars)
 
     # Output result as text or binary file as needed
     if output_file_should_escape_chars:
         # Text file
         listing = "".join(listing)
-        with open(args[1], "w") as f:
+        with open(parsed.output_file, "w") as f:
             f.write(listing)
     else:
         # Binary file
         listing = b"".join(listing)
-        with open(args[1], "wb") as f:
+        with open(parsed.output_file, "wb") as f:
             f.write(listing)
 
     if not success:
         sys.exit(1)
 
 if __name__ == '__main__':
-    main(sys.argv[1:])
+    main(sys.argv)
