@@ -232,7 +232,7 @@ def get_token_from_keyword_string(keyword: str):
             return key.token
     return None
 
-class _Reader:
+class Reader:
     """Buffered character reader that normalizes line endings.
 
     Handles CR, LF, and CRLF line endings, converting all to CR internally.
@@ -371,7 +371,7 @@ class _Reader:
         self.dont_tokenize = dont_tokenize
 
 
-class _Writer:
+class Writer:
     """Buffer for building a tokenized BASIC line.
 
     Each line has the format: CR, high byte of line number, low byte,
@@ -420,7 +420,7 @@ class _Writer:
         return self.buffer[:self.length]
 
 
-def _skip_write(test_func, reader: _Reader, writer: _Writer) -> None:
+def _skip_write(test_func, reader: Reader, writer: Writer) -> None:
     """Read and write characters while test_func returns True."""
     while not reader.is_end() and test_func(reader.current_char()):
         writer.write(reader.current_char())
@@ -457,7 +457,7 @@ def _is_hex_digit(c: str) -> bool:
     return ('A' <= c <= 'F') or _is_digit(c)
 
 
-def _tokenize_linenum(reader: _Reader, writer: _Writer) -> bool:
+def _tokenize_linenum(reader: Reader, writer: Writer) -> bool:
     """Tokenize a line number reference (e.g., in GOTO/GOSUB).
 
     Line numbers are encoded as 3 bytes after the LINE_NUMBER_TOKEN.
@@ -494,13 +494,13 @@ def _tokenize_linenum(reader: _Reader, writer: _Writer) -> bool:
     return
 
 
-def _read_next_char(reader: _Reader) -> str | None:
+def _read_next_char(reader: Reader) -> str | None:
     """Advance reader and return the new current character."""
     reader.next_char()
     return reader.current_char()
 
 
-def _parse_keyword(reader: _Reader, writer: _Writer) -> _Keyword | None:
+def _parse_keyword(reader: Reader, writer: Writer) -> _Keyword | None:
     """Attempt to parse and match a keyword from the current position.
 
     Handles full keywords and abbreviations (e.g., "P." for PRINT).
@@ -509,29 +509,32 @@ def _parse_keyword(reader: _Reader, writer: _Writer) -> _Keyword | None:
     match_count = 0
     match_name = None
 
-    if not reader.dont_tokenize:
-        for keyword in _keyword_list:
-            if not match_count or (match_count <= len(keyword.name) and match_name[:match_count] == keyword.name[:match_count]):
-                while (match_count < len(keyword.name) and
-                       reader.current_char() == keyword.name[match_count]):
+    for keyword in _keyword_list:
+        if not match_count or (match_count <= len(keyword.name) and match_name[:match_count] == keyword.name[:match_count]):
+            while (match_count < len(keyword.name) and
+                   reader.current_char() == keyword.name[match_count]):
+                reader.next_char()
+                match_count += 1
+
+            if match_count:
+                match_name = keyword.name
+                if match_count == len(keyword.name):
+                    if reader.dont_tokenize:
+                        # We match the keyword, but we don't tokenize it, 
+                        # we just write out the ASCII letters.
+                        break
+
+                    if keyword.flags & KeywordFlags.C:
+                        if _is_alpha_digit(reader.current_char()):
+                            # Keyword with flag C is not valid as it's followed by alphanumeric,
+                            # we just write out the ASCII letters.
+                            break
+                    return keyword
+
+                if reader.current_char() == '.':
                     reader.next_char()
-                    match_count += 1
-    
-                if match_count:
-                    if match_count == len(keyword.name):
-                        if keyword.flags & KeywordFlags.C:
-                            if _is_alpha_digit(reader.current_char()):
-                                for i in range(match_count):
-                                    writer.write(ord(keyword.name[i]))
-                                _skip_write(_is_alpha_digit, reader, writer)
-                                return None
-                        return keyword
-    
-                    if reader.current_char() == '.':
-                        reader.next_char()
-                        return keyword
-    
-                    match_name = keyword.name
+                    return keyword
+
 
     if match_count:
         for i in range(match_count):
@@ -543,7 +546,7 @@ def _parse_keyword(reader: _Reader, writer: _Writer) -> _Keyword | None:
     return None
 
 
-def _tokenize_line_contents(reader: _Reader, writer: _Writer) -> None:
+def tokenize_line_contents(reader: Reader, writer: Writer) -> None:
     """Tokenize the contents of a single BASIC line.
 
     Processes keywords, strings, numbers, and special characters,
@@ -658,7 +661,7 @@ def _tokenize_line_contents(reader: _Reader, writer: _Writer) -> None:
                 return
 
 
-def tokenize_line(reader: _Reader, writer: _Writer, previous_line_number: int, tokenized: list[int]) -> int:
+def tokenize_line(reader: Reader, writer: Writer, previous_line_number: int, tokenized: list[int]) -> int:
     """Tokenize a line of BBC BASIC.
 
     Args:
@@ -691,8 +694,9 @@ def tokenize_line(reader: _Reader, writer: _Writer, previous_line_number: int, t
     # Create a line number if none present
     if saw_digit:
         if line_number <= previous_line_number:
-            # I treat this as a warning, as there are files out there whose line numbers
-            # are in the wrong order and we want to be able to recreate them from ASCII.
+            # There are files out there in the wild whose line numbers are in 
+            # the wrong order. We want to be able to recreate them from ASCII.
+            # So we warn about this issue rather than raise an error.
             #raise TokenizeError(reader.line_number(), "Line numbers must increase")
             print(f"WARNING: Line numbers are not in order: line {line_number} occurs after line {previous_line_number}.")
     else:
@@ -705,14 +709,14 @@ def tokenize_line(reader: _Reader, writer: _Writer, previous_line_number: int, t
 
     # Tokenize the line
     writer.init(line_number)
-    _tokenize_line_contents(reader, writer)
+    tokenize_line_contents(reader, writer)
 
     # Error if the line is too long
     if not writer.finish():
         raise TokenizeError(reader.line_number(), "Line too long after tokenizing")
 
     # Add the tokenized line to the tokenized data
-    # Length four is an empty line, but happens, e.g. In $.MENU of in Revs 4 Tracks ( https://bbcmicro.co.uk/game.php?id=1128 )
+    # Length four is an empty line, but this happens, e.g. In $.MENU of in Revs 4 Tracks ( https://bbcmicro.co.uk/game.php?id=1128 )
     if writer.length >= 4:
         tokenized.extend(writer.data())
 
@@ -735,9 +739,9 @@ def tokenize_file(file: BinaryIO, input_file_contains_escaped_chars: bool = True
     """
     global cached_chars
 
-    reader = _Reader(file, input_file_contains_escaped_chars)
+    reader = Reader(file, input_file_contains_escaped_chars)
     previous_line_number = -1
-    writer = _Writer()
+    writer = Writer()
 
     tokenized: list[int] = []
     cached_chars = deque()

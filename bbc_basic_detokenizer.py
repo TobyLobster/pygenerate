@@ -12,6 +12,8 @@ Based on the PD JavaScript version at https://github.com/shawty/BBCB_DFS_Catalog
 which was based on the original list.pl code from MMB_Utils https://github.com/sweharris/MMB_Utils
 """
 import sys
+from io import BytesIO
+import bbc_basic_tokenizer as bbt
 
 # BBC BASIC tokens mapping
 TOKENS = {
@@ -80,20 +82,72 @@ TOKENS = {
     191: 'INKEY$',   255: 'OSCLI',
 }
 
-def convert_to_string(int_list) -> str:
-    result = []
-    for number in int_list:
-        if number == 92:  # ASCII code for backslash
-            result.append('\\x5c')
-        if 32 <= number < 127:  # Printable ASCII range
-            result.append(chr(number))
-        else:
-            result.append(f'\\x{number:02x}')  # Non-printable character
-    return ''.join(result)
+# Create the reverse dictionary, keywords to tokens
+TOKENS_REV = {}
+for key, value in TOKENS.items():
+    if value in TOKENS_REV:
+        # keep the lower numeric key
+        TOKENS_REV[value] = min(TOKENS_REV[value], key)
+    else:
+        TOKENS_REV[value] = key
 
+TOKENS_REV_NAMES = [s.encode("ascii") for s in TOKENS_REV]
+
+# List of tokens for pseudo-variables (LHS versions): LOMEM, HIMEM, PAGE, PTR, TIME
+pseudo_variables_lhs = [207, 208, 209, 210, 211]
+
+def escape(number: int, output_file_should_escape_chars: bool) -> list:
+    """If escapes are required, then change a backslash to a double backslash 
+    and any non-printable characters to \xFF format"""
+    if number == 92:
+        if not output_file_should_escape_chars:
+            return [92]
+        # A backslash character normally signifies the start of a markup e.g. \{TAB},
+        # but here we are just trying to use a regular backslash in our program,
+        # so we encode it as double backslash.
+        return [92, 92]
+    elif 32 <= number < 127:
+        # Printable ASCII
+        return [number]
+    else:
+        if not output_file_should_escape_chars:
+            return [number]
+        # Non-printable -> hex escape like '\xHH'
+        return [ord(ch) for ch in f'\\x{number:02x}']
+
+def convert_to_string(int_list: list(int)) -> str:
+    """Convert a list of integers into a string with the ASCII encoding"""
+    return ''.join(chr(i) for i in int_list)
+    
 def listing_append(listing, data_to_add):
+    """Append data to the listing"""
     listing.append(data_to_add)
 
+def endswith_list(lst, sub):
+    """Does the list end with the sub-list?"""
+    if not sub:
+        return True
+    if len(sub) > len(lst):
+        return False
+    return lst[-len(sub):] == sub
+
+def list_of_ascii_bytes(string: str) -> list(bytes):
+    """Convert a string into a list of integers"""
+    return list(bytes(string, encoding="ascii"))
+
+def round_trip_works(line: list, new_bit: list, expected_ending: list):
+    """'line' extended with 'new_bit' is an ASCII string supplied as a list 
+    of integer values. It represents the BASIC line we are tokenizing. We 
+    tokenise it to see if it matches the expected_ending."""
+    new_line = line.copy()
+    new_line.extend(new_bit)
+    reader = bbt.Reader(BytesIO(bytes(new_line)), contains_escaped_characters=True)
+    writer = bbt.Writer()
+    bbt.tokenize_line_contents(reader, writer)
+    result = list(writer.data())
+    if endswith_list(result, expected_ending):
+        return True
+    return False
 
 def decode_basic(file_data: bytes, output_file_should_escape_chars: bool = True, start_index: int = 0) -> tuple[list, int, bool]:
     """
@@ -175,7 +229,7 @@ def decode_basic(file_data: bytes, output_file_should_escape_chars: bool = True,
                 # occurs in games sometimes where a REM statement has a short amount
                 # of machine code or data in it. (See file '$.HEADER' in the game
                 # 'Rat Catcher' for an example, https://bbcmicro.co.uk/game.php?id=4332 ).
-                decoded.append(byte)
+                decoded.extend(escape(byte, output_file_should_escape_chars))
             elif byte == 0x8D:
                 # Encoded line number token
                 # Decode using algorithm from "The BASIC ROM User Guide" page 41
@@ -193,9 +247,70 @@ def decode_basic(file_data: bytes, output_file_should_escape_chars: bool = True,
                 line_ref = high * 256 + low
                 decoded.extend(list(bytes(str(line_ref), encoding="ascii")))
             elif byte in TOKENS:
-                decoded.extend(list(bytes(TOKENS[byte], encoding="ascii")))
+                # We have found a token. The normal thing to do is to just output 
+                # the text of the token. This results in a text file that will get
+                # tokenized just as if it were typed at the BASIC command prompt.
+                #
+                # However, in the case of some games the tokenized BASIC has been 
+                # manipulated by means other than typing lines at the BASIC prompt. 
+                # For example, by poking directly into memory, spaces can be removed
+                # that could not be removed when typing lines at the BASIC prompt.
+                # 
+                # This results in a slight faster and smaller program but 
+                # one that cannot be typed in the regular way at the BASIC prompt.
+                #
+                # To handle these BASIC programs, we encode with extra markup. In 
+                # particular e.g. \{TAB} forces the tokenizer to tokenize the TAB 
+                # keyword even if the regular tokenizer wouldn't. For 
+                # pseudo-variables we can force the LHS token with \{PAGE-LHS} if 
+                # needed.
+                token_string = list_of_ascii_bytes(TOKENS[byte])
+                token_string_marked_up = list_of_ascii_bytes('\\{' + TOKENS[byte] + '}')
+                token_string_marked_up_lhs = list_of_ascii_bytes('\\{' + TOKENS[byte] + '-LHS}')
+                
+                if round_trip_works(decoded, token_string, list([byte])):
+                    decoded.extend(token_string)
+                elif round_trip_works(decoded, token_string_marked_up, list([byte])):
+                    decoded.extend(token_string_marked_up)
+                elif (byte in pseudo_variables_lhs) and round_trip_works(decoded, token_string_marked_up_lhs, list([byte])):
+                    decoded.extend(token_string_marked_up_lhs)
+                else:
+                    # Error out
+                    listing_append(listing, f"ERROR: Could not detokenize {byte} and get a valid round trip")
+                    return listing, i, False
             else:
-                decoded.append(byte)
+                # Acornsoft Reversi (https://bbcmicro.co.uk/game.php?id=4463) has 
+                # a BASIC variable named 'IF'. This is not normally possible when 
+                # typing lines of BASIC code at the BASIC command prompt, since 
+                # 'IF' would get tokenized as a keyword.
+                #
+                # So if we find the letters that match a keyword, we check that 
+                # we can round trip the detokenize and tokenize. If it doesn't 
+                # round trip correctly, then we can mark it up as e.g. \{"IF"} 
+                # to avoid any tokenization.
+                
+                # Check if there is the text of a keyword present here
+                match = next((s for s, b in zip(TOKENS_REV, TOKENS_REV_NAMES) if file_data[i:].startswith(b)), None)
+                if match:
+                    # Check the round trip works as expected when we record the token as a single byte
+                    if round_trip_works(decoded, list_of_ascii_bytes(match), list_of_ascii_bytes(match)):
+                        decoded.extend(list_of_ascii_bytes(match))
+                    else:
+                        # If no round trip to the byte we want, then mark it explicitly 
+                        # as the string of letters, e.g. \{"IF"}
+                        token_string_quoted_marked_up = list_of_ascii_bytes('\\{"' + match + '"}')
+                        if round_trip_works(decoded, token_string_quoted_marked_up, list_of_ascii_bytes(match)):
+                            decoded.extend(token_string_quoted_marked_up)
+                            i += len(match)-1
+                        else:
+                            # Error out
+                            decoded.extend(token_string_quoted_marked_up)
+                            i += len(match)-1
+                            listing_append(listing, f"ERROR: Could not detokenize {byte} and get a valid round trip")
+                            return listing, i, False
+                else:
+                    # No potential keyword found. Output a regular character.
+                    decoded.extend(escape(byte, output_file_should_escape_chars))
 
             # Toggle quote state
             if chr(byte) == '"':
@@ -236,13 +351,13 @@ def decode_basic_file(filepath: str, output_file_should_escape_chars: bool) -> t
 def main(args: list[str]) -> None:
     """Main entry point for command-line tokenization."""
     if len(args) < 2:
-        print('BBC BASIC II detokenizer.')
-        print('')
-        print('Converts a tokenized BBC BASIC II file into detokenized ASCII BASIC source code.')
-        print('')
-        print('By default, unprintable characters are converted to "\\x07" style strings to give a pure ASCII result.')
-        print('To override this behaviour, add the "--no_escape" argument. In this case, non-printable characters will be output as raw binary.')
-        print('')
+        print('BBC BASIC II detokenizer.', file=sys.stderr)
+        print('', file=sys.stderr)
+        print('Converts a tokenized BBC BASIC II file into detokenized ASCII BASIC source code.', file=sys.stderr)
+        print('', file=sys.stderr)
+        print('By default, unprintable characters are converted to "\\x07" style strings to give a pure ASCII result.', file=sys.stderr)
+        print('To override this behaviour, add the "--no_escape" argument. In this case, non-printable characters will be output as raw binary.', file=sys.stderr)
+        print('', file=sys.stderr)
         print("Usage: python3 bbc_basic_detokenizer.py <input_tokenized_file> <output_text_file> {--no_escape}", file=sys.stderr)
         sys.exit(1)
 
@@ -267,7 +382,6 @@ def main(args: list[str]) -> None:
 
     if not success:
         sys.exit(1)
-
 
 if __name__ == '__main__':
     main(sys.argv[1:])
