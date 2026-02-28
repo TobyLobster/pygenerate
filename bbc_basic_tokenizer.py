@@ -350,11 +350,11 @@ class Reader:
             if self.end:
                 return
             self.line += 1
-        next_char, dont_tokenize = self.read_one_char()
+        next_char, self.dont_tokenize = self.read_one_char()
 
         # Skip over LF if CR was previous character (handle CRLF)
         if self.previous_char_was_cr and next_char == LF:
-            next_char, dont_tokenize = self.read_one_char()
+            next_char, self.dont_tokenize = self.read_one_char()
         if next_char is None:
             if self.file.readable():
                 self.errno = errno.errorcode
@@ -367,7 +367,6 @@ class Reader:
         else:
             self.previous_char_was_cr = (next_char == CR)
             self.current = next_char
-        self.dont_tokenize = dont_tokenize
 
 
 class Writer:
@@ -507,6 +506,9 @@ def _parse_keyword(reader: Reader, writer: Writer) -> _Keyword | None:
     """
     match_count = 0
     match_name = None
+    
+    # Should we tokenise at the start of this potential keyword?
+    dont_tokenize = reader.dont_tokenize
 
     for keyword in _keyword_list:
         if not match_count or (match_count <= len(keyword.name) and match_name[:match_count] == keyword.name[:match_count]):
@@ -518,7 +520,7 @@ def _parse_keyword(reader: Reader, writer: Writer) -> _Keyword | None:
             if match_count:
                 match_name = keyword.name
                 if match_count == len(keyword.name):
-                    if reader.dont_tokenize:
+                    if dont_tokenize:
                         # We match the keyword, but we don't tokenize it, 
                         # we just write out the ASCII letters.
                         break
@@ -614,7 +616,7 @@ def tokenize_line_contents(reader: Reader, writer: Writer) -> None:
             tokenize_numbers = False
             continue
 
-        if not _is_alpha_digit(reader.current_char()):
+        if not _is_alpha_digit(c):
             start_of_line = False
             tokenize_numbers = False
             writer.write(reader.current_char())
