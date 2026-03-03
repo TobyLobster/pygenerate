@@ -136,7 +136,7 @@ def list_of_ascii_bytes(s: str) -> list[bytes]:
     """Convert a string into a list of integers"""
     return bytes(s.encode("ascii"))
 
-def round_trip_works(line: list, new_bit: list, expected_ending: list):
+def round_trip_works(line: list, new_bit: list, expected_ending: list, next_char: str = None):
     """'line' extended with 'new_bit' is an ASCII string supplied as a list 
     of integer values. It represents the BASIC line we are tokenizing. We 
     tokenise it to see if it matches the expected_ending."""
@@ -146,7 +146,15 @@ def round_trip_works(line: list, new_bit: list, expected_ending: list):
     writer = bbt.Writer()
     bbt.tokenize_line_contents(reader, writer)
     result = list(writer.data())
-    return endswith_list(result, expected_ending)
+    if endswith_list(result, expected_ending):
+        # if the ending is a keyword of type C, then it must not have a letter of number immediately following
+        if (next_char is not None) and (bbt._is_alpha_digit(next_char)):
+            for keyword in bbt._keyword_list:
+                if expected_ending[0] == keyword.token:
+                    if keyword.flags & bbt.KeywordFlags.C:
+                        return False
+        return True
+    return False
 
 def decode_basic(file_data: bytes, output_file_should_escape_chars: bool = True, start_index: int = 0) -> tuple[list, int, bool]:
     """
@@ -267,7 +275,8 @@ def decode_basic(file_data: bytes, output_file_should_escape_chars: bool = True,
                 token_string_marked_up = list_of_ascii_bytes('\\{' + TOKENS[byte] + '}')
                 token_string_marked_up_lhs = list_of_ascii_bytes('\\{' + TOKENS[byte] + '-LHS}')
                 
-                if round_trip_works(decoded, token_string, [byte]):
+                next_char = chr(file_data[i+1]) if (i+1) < line_end else None
+                if round_trip_works(decoded, token_string, [byte], next_char):
                     decoded.extend(token_string)
                 elif round_trip_works(decoded, token_string_marked_up, [byte]):
                     decoded.extend(token_string_marked_up)

@@ -390,20 +390,20 @@ acorn.bbc()
         bin_to_hextext(bbc_file.host_filepath, hex_text_filepath)
 
         # Make the binary file from the hex text form: 'source/<file>_hex.txt' to 'build/disk/<file>'
-        build_script = f'destination_filepath = script_dir / "build" / "disc" / "{os.path.basename(bbc_file.host_filepath)}"\n'
-        build_script = f'hextext_to_bin("source/{hex_text_basename}", destination_filepath)\n'
+        build_script = f"destination_filepath = script_dir / 'build' / 'disc' / {repr(os.path.basename(bbc_file.host_filepath))}\n"
+        build_script = f'hextext_to_bin({repr("source/" + hex_text_basename)}", destination_filepath)\n'
         return (build_script, True)
 
-    control_script += f'load(0x{load_address:04x}, "original/{os.path.basename(bbc_file.host_filepath)}", "6502")\n'
+    control_script += f"load(0x{load_address:04x}, {repr('original/' + os.path.basename(bbc_file.host_filepath))}, '6502')\n"
     if load_address == SIDEWAYS_ROM_ADDRESS:
         control_script += 'acorn.is_sideways_rom()\n'
 
     # TODO: Really only one range is supported atm
     for r in basic_memory_ranges:
-        control_script += f'include_binary_file(0x{r[0] & 0xffff:04x}, "build/{os.path.basename(bbc_file.host_filepath)}_basic")\n'
+        control_script += f'include_binary_file(0x{r[0] & 0xffff:04x}, {repr("build/" + os.path.basename(bbc_file.host_filepath) + "_basic")})\n'
 
     if bbc_file.has_valid_exec(basic_memory_ranges):
-        control_script += f'entry(0x{bbc_file.exec_address & 0xffff:04x}, "entry_point")\n'
+        control_script += f"entry(0x{bbc_file.exec_address & 0xffff:04x}, 'entry_point')\n"
     control_script += "\ngo()\n"
 
     # Write the control file
@@ -411,10 +411,10 @@ acorn.bbc()
         fh.write(control_script)
 
     # Execute the control file (calls py8dis to create the assembly file)
-    build_script = f'disassemble("{os.path.basename(control_filepath)}", "{asm_file}")\n'
+    build_script = f'disassemble({repr(os.path.basename(control_filepath))}, {repr(asm_file)})\n'
 
     # Assemble asm into new binaries
-    build_script += f'assemble("{asm_file}", "{os.path.basename(bbc_file.host_filepath)}")\n'
+    build_script += f'assemble({repr(asm_file)}, {repr(os.path.basename(bbc_file.host_filepath))})\n'
     return (build_script, False)
 
 def parse_arguments(args: Sequence[str]) -> None:
@@ -490,17 +490,17 @@ def main(args: Sequence[str]) -> None:
             files_to_process.append(bbc_file)
 
     if config.assembler == "acme":
-        assemble = """args = ["acme", "--symbollist", symbols_filepath, "-r", report_filepath, "-o", str(binary_filepath_full), str(asm_filepath_full)]
-    run_subprocess(args, "assembly failed", script_dir)"""
+        assemble = """args = ['acme', '--symbollist', symbols_filepath, '-r', report_filepath, '-o', str(binary_filepath_full), str(asm_filepath_full)]
+    run_subprocess(args, 'assembly failed', script_dir)"""
     elif config.assembler == "beebasm":
-        assemble = """args = ["beebasm", "-o", str(binary_filepath_full), "-i", str(asm_filepath_full), "-v"]
+        assemble = """args = ['beebasm', '-o', str(binary_filepath_full), '-i', str(asm_filepath_full), '-v']
 
-    report = run_subprocess(args, "assembly failed", script_dir)
-    with open(report_filepath, "wb") as f:
+    report = run_subprocess(args, 'assembly failed', script_dir)
+    with open(report_filepath, 'wb') as f:
         f.write(report)"""
 
     build_script = f"""#!/usr/bin/env python3
-\"\"\"Build script for creating BBC Micro disk images for {os.path.basename(config.destination_folder)}.
+\"\"\"Build script for creating BBC Micro disk images for {repr(os.path.basename(config.destination_folder))}.
 
 This script:
 - Disassembles the binaries using control files (see py8dis) into {config.assembler} assembly
@@ -529,11 +529,11 @@ def hextext_to_bin(src_path: str, dst_path: str) -> None:
     \"\"\"
     import re
 
-    hex_byte_re = re.compile(r"\\b([0-9A-Fa-f]{{2}})\\b")
-    with open(src_path, "r", encoding="utf-8") as fin, open(dst_path, "wb") as fout:
+    hex_byte_re = re.compile(r'\\b([0-9A-Fa-f]{{2}})\\b')
+    with open(src_path, 'r', encoding='utf-8') as fin, open(dst_path, 'wb') as fout:
         for line in fin:
             # drop inline comments
-            line = line.split("#", 1)[0]
+            line = line.split('#', 1)[0]
             for m in hex_byte_re.finditer(line):
                 fout.write(bytes([int(m.group(1), 16)]))
 
@@ -564,11 +564,11 @@ def disassemble(python_filepath: str, asm_filepath: str) -> None:
         python_filepath: Relative path to the control script (within 'control' dir).
         asm_filepath: Relative path for the output assembly file (within 'source' dir).
     \"\"\"
-    python_filepath_full = script_dir / "control" / python_filepath
-    asm_filepath_full = script_dir / "source" / asm_filepath
+    python_filepath_full = script_dir / 'control' / python_filepath
+    asm_filepath_full = script_dir / 'source' / asm_filepath
 
-    args = ["python3", str(python_filepath_full), "--beebasm", "--output", str(asm_filepath_full)]
-    run_subprocess(args, "disassemble failed", script_dir)
+    args = ['python3', str(python_filepath_full), '--beebasm', '--output', str(asm_filepath_full)]
+    run_subprocess(args, 'disassemble failed', script_dir)
 
 
 def make_inf(binary_filepath: Path, bbc_bin_filename: str, load_address: int, exec_address: int, locked: str) -> None:
@@ -582,7 +582,7 @@ def make_inf(binary_filepath: Path, bbc_bin_filename: str, load_address: int, ex
         locked: Lock status ('L' for locked, '' for unlocked).
     \"\"\"
     inf_text = f'{{bbc_bin_filename:<12}} {{load_address:06X}} {{exec_address:06X}} {{locked}}'
-    with open(str(binary_filepath) + ".inf", "w") as text_file:
+    with open(str(binary_filepath) + '.inf', 'w') as text_file:
         text_file.write(inf_text)
 
 
@@ -593,10 +593,10 @@ def assemble(asm_filepath: str, binary_filepath: str) -> None:
         asm_filepath: Relative path to the assembly source (within 'source' dir).
         binary_filepath: Relative path for the output binary (within 'build/disc' dir).
     \"\"\"
-    asm_filepath_full = script_dir / "source" / asm_filepath
-    binary_filepath_full = script_dir / "build" / "disc" / binary_filepath
+    asm_filepath_full = script_dir / 'source' / asm_filepath
+    binary_filepath_full = script_dir / 'build' / 'disc' / binary_filepath
     asm_filename = asm_filepath_full.stem
-    report_filepath = script_dir / "build" / f"{{asm_filename}}_report.txt"
+    report_filepath = script_dir / 'build' / f'{{asm_filename}}_report.txt'
 
     # Assemble
     {assemble}
@@ -609,11 +609,11 @@ def copy_text_to_bbc(source_filepath: Path, destination_filepath: Path) -> None:
         source_filepath: Path to the source text file.
         destination_filepath: Path for the output file.
     \"\"\"
-    with open(source_filepath, "rb") as f:
+    with open(source_filepath, 'rb') as f:
         content = f.read()
 
     # Replace host line terminator with BBC Micro line terminator (0x0d)
-    with open(destination_filepath, "wb") as f:
+    with open(destination_filepath, 'wb') as f:
         f.write(content.replace(os.linesep.encode(), b'\\x0d'))
 
 
@@ -624,9 +624,9 @@ def tokenize_basic(source_filepath: Path, destination_filepath: Path) -> None:
         source_filepath: Path to the BASIC source text file.
         destination_filepath: Path for the tokenized output file.
     \"\"\"
-    with open(source_filepath, "rb") as f:
+    with open(source_filepath, 'rb') as f:
         tokenized_result = bbc_basic_tokenizer.tokenize_file(f, input_file_contains_escaped_chars=True)
-        with open(destination_filepath, "wb") as file:
+        with open(destination_filepath, 'wb') as file:
             file.write(bytearray(tokenized_result))
         return len(tokenized_result)
 
@@ -661,7 +661,7 @@ def add_file(
     )
 
 # Make build/disc directory
-(script_dir / "build" / "disc").mkdir(parents=True, exist_ok=True)
+(script_dir / 'build' / 'disc').mkdir(parents=True, exist_ok=True)
 """
 
     # Process each file, creating a control script for each binary we need to deal with
@@ -697,10 +697,10 @@ def add_file(
 
                 # Convert to BASIC II format on disc
                 build_script += f'\n# Create BASIC file {bbc_file.bbc_filepath}\n'
-                build_script += f'source_filepath = script_dir / "source" / "{os.path.basename(bbc_file.source_filepath)}"\n'
-                build_script += f'destination_filepath = script_dir / "build" / "disc" / "{os.path.basename(bbc_file.host_filepath)}"\n'
+                build_script += f"source_filepath = script_dir / 'source' / {repr(os.path.basename(bbc_file.source_filepath))}\n"
+                build_script += f"destination_filepath = script_dir / 'build' / 'disc' / {repr(os.path.basename(bbc_file.host_filepath))}\n"
                 if needs_assembly:
-                    build_script += f'tokenized_basic = script_dir / "build" / "{os.path.basename(bbc_file.host_filepath)}_basic"\n'
+                    build_script += f"tokenized_basic = script_dir / 'build' / {repr(os.path.basename(bbc_file.host_filepath) + '_basic')}\n"
                     build_script += f'tokenize_basic(source_filepath, tokenized_basic)\n'
 
                     asm_file = f"{os.path.basename(bbc_file.host_filepath)}_{config.assembler}.asm"
@@ -715,7 +715,7 @@ def add_file(
                     build_script += f'tokenize_basic(source_filepath, destination_filepath)\n'
 
                 # Create INF for destination file
-                build_script += f'make_inf(destination_filepath, "{bbc_file.bbc_filepath}", 0x{bbc_file.load_address:06x}, 0x{bbc_file.exec_address:06x}, "{"L" if bbc_file.locked else ""}")\n'
+                build_script += f"make_inf(destination_filepath, {repr(bbc_file.bbc_filepath)}, 0x{bbc_file.load_address:06x}, 0x{bbc_file.exec_address:06x}, '{'L' if bbc_file.locked else ''}')\n"
 
             elif is_totally_printable(content):
                 print(" as text")
@@ -725,9 +725,9 @@ def add_file(
                     fh.write(content.replace(b'\x0d', os.linesep.encode()))
 
                 build_script += f'\n# Create text file {bbc_file.bbc_filepath}\n'
-                build_script += f'destination_filepath = script_dir / "build" / "disc" / "{os.path.basename(bbc_file.host_filepath)}"\n'
-                build_script += f'copy_text_to_bbc(script_dir / "source" / "{os.path.basename(bbc_file.source_filepath)}", destination_filepath)\n'
-                build_script += f'make_inf(destination_filepath, "{bbc_file.bbc_filepath}", 0x{bbc_file.load_address:06x}, 0x{bbc_file.exec_address:06x}, "{"L" if bbc_file.locked else ""}")\n'
+                build_script += f"destination_filepath = script_dir / 'build' / 'disc' / {repr(os.path.basename(bbc_file.host_filepath))}\n"
+                build_script += f"copy_text_to_bbc(script_dir / 'source' / {repr(os.path.basename(bbc_file.source_filepath))}, destination_filepath)\n"
+                build_script += f"make_inf(destination_filepath, {repr(bbc_file.bbc_filepath)}, 0x{bbc_file.load_address:06x}, 0x{bbc_file.exec_address:06x}, '{'L' if bbc_file.locked else ''}')\n"
 
             else:
                 if bbc_file.has_valid_exec():
@@ -745,11 +745,11 @@ def add_file(
                     build_script += f'\n# Create hex file {bbc_file.bbc_filepath}\n'
                 else:
                     build_script += f'\n# Create disassembly {bbc_file.bbc_filepath}\n'
-                build_script += f'destination_filepath = script_dir / "build" / "disc" / "{os.path.basename(bbc_file.host_filepath)}"\n'
+                build_script += f"destination_filepath = script_dir / 'build' / 'disc' / {repr(os.path.basename(bbc_file.host_filepath))}\n"
                 build_script += build_script_result
 
                 # Create INF for destination file
-                build_script += f'make_inf(destination_filepath, "{bbc_file.bbc_filepath}", 0x{bbc_file.load_address:06x}, 0x{bbc_file.exec_address:06x}, "{"L" if bbc_file.locked else ""}")\n'
+                build_script += f"make_inf(destination_filepath, {repr(bbc_file.bbc_filepath)}, 0x{bbc_file.load_address:06x}, 0x{bbc_file.exec_address:06x}, '{'L' if bbc_file.locked else ''}')\n"
 
     # Create disc image
     build_script += f'\n# Create {config.extension}\n'
@@ -758,21 +758,21 @@ def add_file(
     else:
         ssd_title = os.path.basename(config.destination_folder)
 
-    build_script += f'with dfsimage.Image.create(str(script_dir / "{ssd_title}_new.ssd")) as image:\n'
+    build_script += f'with dfsimage.Image.create(str(script_dir / {repr(ssd_title + "_new.ssd")})) as image:\n'
 
     # Add title and opt to each side, based on original SSD
     if config.ssd_filepath:
         side_index = 0
         sides_metadata = disc_metadata(config.ssd_filepath)
         for side in sides_metadata:
-            build_script += f"    image.sides[{side_index}].title = '{side[0]}'\n"
+            build_script += f"    image.sides[{side_index}].title = {repr(side[0])}\n"
             build_script += f"    image.sides[{side_index}].opt = {side[1]}\n"
             side_index += 1
 
     # Add files
     files_to_process.reverse()
     for bbc_file in files_to_process:
-        build_script += f"    add_file(image, script_dir / 'build' / 'disc' / '{os.path.basename(bbc_file.host_filepath)}', '{bbc_file.bbc_filepath}', load_addr=0x{bbc_file.load_address:06x}, exec_addr=0x{bbc_file.exec_address:06x}, locked={bbc_file.locked})\n"
+        build_script += f"    add_file(image, script_dir / 'build' / 'disc' / {repr(os.path.basename(bbc_file.host_filepath))}, {repr(bbc_file.bbc_filepath)}, load_addr=0x{bbc_file.load_address:06x}, exec_addr=0x{bbc_file.exec_address:06x}, locked={bbc_file.locked})\n"
 
     # Copy dfsimage and basic tokenizer
     shutil.copytree(os.path.join(script_dir, "dfsimage"), os.path.join(config.destination_folder, "dfsimage"), dirs_exist_ok=True)
