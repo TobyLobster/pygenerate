@@ -391,7 +391,7 @@ acorn.bbc()
 
         # Make the binary file from the hex text form: 'source/<file>_hex.txt' to 'build/disk/<file>'
         build_script = f"destination_filepath = script_dir / 'build' / 'disc' / {repr(os.path.basename(bbc_file.host_filepath))}\n"
-        build_script = f'hextext_to_bin({repr("source/" + hex_text_basename)}", destination_filepath)\n'
+        build_script = f'hextext_to_bin({repr("source/" + hex_text_basename)}, destination_filepath)\n'
         return (build_script, True)
 
     control_script += f"load(0x{load_address:04x}, {repr('original/' + os.path.basename(bbc_file.host_filepath))}, '6502')\n"

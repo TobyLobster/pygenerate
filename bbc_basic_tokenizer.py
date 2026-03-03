@@ -249,9 +249,10 @@ class Reader:
         self.previous_char_was_cr = False
         self._cached_chars: deque[bytes] = deque()
         self.dont_tokenize = False
+        self.is_marked_up_tokenised_keyword = False
         self.next_char()
 
-    def read_one_char(self) -> tuple[int | None, bool]:
+    def read_one_char(self) -> tuple[int | None, bool, bool]:
         """Read a single byte from the file. It also handles escaped 
         expressions like:
 
@@ -260,15 +261,17 @@ class Reader:
             \\{TIME-LHS} (which forces the left hand side token, for pseudo-variables)
             \\{"IF"}     (which forces no tokenization).
         
-        The return value is a tuple of the character read, and the 'dont_tokenize' 
-        boolean value."""
+        The return value is a tuple of:
+            * the character read
+            * the 'dont_tokenize' boolean value (to signify it was a \\{"IF"} style markup found, so we force no tokenization) and 
+            * the 'is_marked_up_tokenised_keyword' boolean value (to signify it was a \\{IF} style markup found, so we forced tokenization)"""
 
         # Cached chars are used for the \{"IF"} style of escaped expression.
         # The I and F are returned on each call along with the boolean value
         # True, meaning don't tokenize these letters.
         if self._cached_chars:
             c = self._cached_chars.popleft()
-            return (ord(c), True)
+            return (ord(c), True, False)
 
         c = self.file.read(1)
         if c is not None:
@@ -294,7 +297,7 @@ class Reader:
                             val = ord('\u23CE')
                         if val == LF:
                             val = ord('\u2193')
-                        return (val, True)
+                        return (val, True, False)
                     elif c == b'{':
                         c = self.file.read(1)
                         if c == b'"':
@@ -307,7 +310,7 @@ class Reader:
                                     if c == b'}':
                                         if self._cached_chars:
                                             c = self._cached_chars.popleft()
-                                            return(ord(c), True)
+                                            return(ord(c), True, False)
                                 elif c is not None:
                                     self._cached_chars.append(c)
                             if c is None:
@@ -321,14 +324,14 @@ class Reader:
                                     c = get_token_from_keyword_string(keyword_string)
                                     if c is None:
                                         raise TokenizeError(self.line_number(), f"Escaped token '{keyword_string}' is not known")
-                                    return (c, False)
+                                    return (c, False, True)
                                 keyword_string += c.decode("ascii")
                                 c = self.file.read(1)
                             if c is None:
                                 raise TokenizeError(self.line_number(), f"Unfinished escaped token '{keyword_string}'")
             if c:
-                return (ord(c), False)
-        return (None, False)
+                return (ord(c), False, False)
+        return (None, False, False)
 
     def line_number(self) -> int:
         """Return the current source line number."""
@@ -350,11 +353,11 @@ class Reader:
             if self.end:
                 return
             self.line += 1
-        next_char, self.dont_tokenize = self.read_one_char()
+        next_char, self.dont_tokenize, self.is_marked_up_tokenised_keyword = self.read_one_char()
 
         # Skip over LF if CR was previous character (handle CRLF)
         if self.previous_char_was_cr and next_char == LF:
-            next_char, self.dont_tokenize = self.read_one_char()
+            next_char, self.dont_tokenize, self.is_marked_up_tokenised_keyword = self.read_one_char()
         if next_char is None:
             if self.file.readable():
                 self.errno = errno.errorcode
@@ -510,6 +513,14 @@ def _parse_keyword(reader: Reader, writer: Writer) -> _Keyword | None:
     # Should we tokenise at the start of this potential keyword?
     dont_tokenize = reader.dont_tokenize
 
+    if reader.is_marked_up_tokenised_keyword:
+        token = reader.current_char()
+        reader.next_char()
+        for keyword in _keyword_list:
+            if keyword.token == token:
+                return keyword
+        return None
+
     for keyword in _keyword_list:
         if not match_count or (match_count <= len(keyword.name) and match_name[:match_count] == keyword.name[:match_count]):
             while (match_count < len(keyword.name) and
@@ -616,7 +627,7 @@ def tokenize_line_contents(reader: Reader, writer: Writer) -> None:
             tokenize_numbers = False
             continue
 
-        if not _is_alpha_digit(c):
+        if not _is_alpha_digit(c) and not reader.is_marked_up_tokenised_keyword:
             start_of_line = False
             tokenize_numbers = False
             writer.write(reader.current_char())
