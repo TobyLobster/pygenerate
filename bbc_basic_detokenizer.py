@@ -18,6 +18,7 @@ The public functions are:
     
 """
 import sys
+import argparse
 from io import BytesIO
 import bbc_basic_tokenizer as bbt
 
@@ -134,7 +135,7 @@ def endswith_list(lst, sub):
 
 def list_of_ascii_bytes(s: str) -> list[bytes]:
     """Convert a string into a list of integers"""
-    return bytes(s.encode("ascii"))
+    return list(bytes(s.encode("ascii")))
 
 def round_trip_works(line: list, new_bit: list, expected_ending: list, next_char: str = None):
     """'line' extended with 'new_bit' is an ASCII string supplied as a list 
@@ -301,8 +302,10 @@ def decode_basic(file_data: bytes, output_file_should_escape_chars: bool = True,
                 match = next((s for s, b in zip(TOKENS_REV, TOKENS_REV_NAMES) if file_data[i:].startswith(b)), None)
                 if match:
                     # Check the round trip works as expected when we record the token as a single byte
-                    if round_trip_works(decoded, list_of_ascii_bytes(match), list_of_ascii_bytes(match)):
-                        decoded.extend(list_of_ascii_bytes(match))
+                    word = list_of_ascii_bytes(match)
+                    if round_trip_works(decoded, word, word):
+                        decoded.extend(word)
+                        i += len(word)-1
                     else:
                         # If no round trip to the byte we want, then mark it explicitly 
                         # as the string of letters, e.g. \{"IF"}
@@ -314,7 +317,7 @@ def decode_basic(file_data: bytes, output_file_should_escape_chars: bool = True,
                             # Error out
                             decoded.extend(token_string_quoted_marked_up)
                             i += len(match)-1
-                            listing.append(f"ERROR: Could not detokenize {byte} and get a valid round trip")
+                            listing.append(f"ERROR: Could not detokenize {byte} and get a valid round trip with possible keyword '{match}'")
                             return listing, i, False
                 else:
                     # No potential keyword found. Output a regular character.
@@ -393,4 +396,4 @@ def main(args: list[str]) -> None:
         sys.exit(1)
 
 if __name__ == '__main__':
-    main(sys.argv)
+    main(sys.argv[1:])

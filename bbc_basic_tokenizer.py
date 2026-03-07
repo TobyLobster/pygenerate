@@ -482,7 +482,8 @@ def _tokenize_linenum(reader: Reader, writer: Writer) -> None:
             for i in range(index):
                 writer.write(buffer[i])
             _skip_write(_is_digit, reader, writer)
-            raise TokenizeError(reader.line_number(), f"Found the line number {acc} which is too big (maximum allowed is 32767)")
+            #raise TokenizeError(reader.line_number(), f"Found the line number {acc} which is too big (maximum allowed is 32767)")
+            print(f"WARNING: On line {reader.line_number()} we found a reference to line number {acc} which is too big (maximum allowed is 32767)")
 
         buffer[index] = ord(c)
         index += 1

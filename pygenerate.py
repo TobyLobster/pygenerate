@@ -353,7 +353,7 @@ def bin_to_hextext(src_path: str, dst_path: str, bytes_per_line: int = 16, upper
             line = " ".join(fmt.format(b) for b in chunk)
             fout.write(line + "\n")
 
-def handle_code(bbc_file, source_directory, control_directory, asm_file, basic_memory_ranges):
+def handle_code(content, bbc_file, source_directory, control_directory, asm_file, basic_memory_ranges):
     control_filepath = os.path.join(control_directory, os.path.basename(bbc_file.host_filepath) + ".py")
     host_filepath_relative_to_script = os.path.relpath(bbc_file.host_filepath, control_directory)
 
@@ -396,7 +396,11 @@ acorn.bbc()
 
     control_script += f"load(0x{load_address:04x}, {repr('original/' + os.path.basename(bbc_file.host_filepath))}, '6502')\n"
     if load_address == SIDEWAYS_ROM_ADDRESS:
-        control_script += 'acorn.is_sideways_rom()\n'
+        if len(content)> 7:
+            copyright_offset = content[7]
+            if len(content) > copyright_offset+3:
+                if content[copyright_offset:copyright_offset+4] == bytes([0, ord('('), ord('C'), ord(')')]):
+                    control_script += 'acorn.is_sideways_rom()\n'
 
     # TODO: Really only one range is supported atm
     for r in basic_memory_ranges:
@@ -490,7 +494,7 @@ def main(args: Sequence[str]) -> None:
             files_to_process.append(bbc_file)
 
     if config.assembler == "acme":
-        assemble = """args = ['acme', '--symbollist', symbols_filepath, '-r', report_filepath, '-o', str(binary_filepath_full), str(asm_filepath_full)]
+        assemble = """args = ['acme', '--symbollist', script_dir / 'build' / f'{{asm_filename}}_symbols.txt', '-r', report_filepath, '-o', str(binary_filepath_full), str(asm_filepath_full)]
     run_subprocess(args, 'assembly failed', script_dir)"""
     elif config.assembler == "beebasm":
         assemble = """args = ['beebasm', '-o', str(binary_filepath_full), '-i', str(asm_filepath_full), '-v']
@@ -549,11 +553,16 @@ def run_subprocess(args: list[str], error_message: str, cwd: Path | None = None)
         The stdout output from the subprocess.
     \"\"\"
     p = subprocess.run(args, capture_output=True, cwd=cwd)
+    s = p.stderr.decode().strip()
+    if s:
+        print(s)
+    
     if p.returncode != 0:
         print(args)
-        print(p.stderr.decode())
+        print(p.stderr.decode().strip())
         print(error_message)
-        sys.exit(p.returncode)
+        if p.returncode:
+            sys.exit(p.returncode)
     return p.stdout
 
 
@@ -567,7 +576,7 @@ def disassemble(python_filepath: str, asm_filepath: str) -> None:
     python_filepath_full = script_dir / 'control' / python_filepath
     asm_filepath_full = script_dir / 'source' / asm_filepath
 
-    args = ['python3', str(python_filepath_full), '--beebasm', '--output', str(asm_filepath_full)]
+    args = ['python3', str(python_filepath_full), f'--{config.assembler}', '--output', str(asm_filepath_full)]
     run_subprocess(args, 'disassemble failed', script_dir)
 
 
@@ -704,7 +713,7 @@ def add_file(
                     build_script += f'tokenize_basic(source_filepath, tokenized_basic)\n'
 
                     asm_file = f"{os.path.basename(bbc_file.host_filepath)}_{config.assembler}.asm"
-                    build_script_result, big_file = handle_code(bbc_file, source_directory, control_directory, asm_file, basic_snippet)
+                    build_script_result, big_file = handle_code(content, bbc_file, source_directory, control_directory, asm_file, basic_snippet)
 
                     if big_file:
                         build_script += f'\n# Create hex file {bbc_file.bbc_filepath}\n'
@@ -739,7 +748,7 @@ def add_file(
                 # For tempest: move(0x0a00, 0x1900, 0x4300-0x1900)
 
                 asm_file = f"{os.path.basename(bbc_file.host_filepath)}_{config.assembler}.asm"
-                build_script_result, big_file = handle_code(bbc_file, source_directory, control_directory, asm_file, [])
+                build_script_result, big_file = handle_code(content, bbc_file, source_directory, control_directory, asm_file, [])
 
                 if big_file:
                     build_script += f'\n# Create hex file {bbc_file.bbc_filepath}\n'
