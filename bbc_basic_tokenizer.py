@@ -511,9 +511,6 @@ def _parse_keyword(reader: Reader, writer: Writer) -> _Keyword | None:
     match_count = 0
     match_name = None
     
-    # Should we tokenise at the start of this potential keyword?
-    dont_tokenize = reader.dont_tokenize
-
     if reader.is_marked_up_tokenised_keyword:
         token = reader.current_char()
         reader.next_char()
@@ -532,11 +529,6 @@ def _parse_keyword(reader: Reader, writer: Writer) -> _Keyword | None:
             if match_count:
                 match_name = keyword.name
                 if match_count == len(keyword.name):
-                    if dont_tokenize:
-                        # We match the keyword, but we don't tokenize it, 
-                        # we just write out the ASCII letters.
-                        break
-
                     if keyword.flags & KeywordFlags.C:
                         if _is_alpha_digit(reader.current_char()):
                             # Keyword with flag C is not valid as it's followed by alphanumeric,
@@ -628,7 +620,7 @@ def tokenize_line_contents(reader: Reader, writer: Writer) -> None:
             tokenize_numbers = False
             continue
 
-        if not _is_alpha_digit(c) and not reader.is_marked_up_tokenised_keyword:
+        if reader.dont_tokenize or (not _is_alpha_digit(c) and not reader.is_marked_up_tokenised_keyword):
             start_of_line = False
             tokenize_numbers = False
             writer.write(reader.current_char())
@@ -696,7 +688,7 @@ def tokenize_line(reader: Reader, writer: Writer, previous_line_number: int, tok
     # Read line number
     line_number = 0
     saw_digit = False
-    while _is_digit(reader.current_char()):
+    while _is_digit(reader.current_char()) and not reader.dont_tokenize:
         saw_digit = True
         line_number = 10 * line_number + (ord(reader.current_char()) - ord('0'))
         if line_number > 0x7FFF:

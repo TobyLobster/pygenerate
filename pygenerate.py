@@ -412,6 +412,11 @@ acorn.bbc()
     else:
         load_address = bbc_file.load_address & 0xffff
 
+    # Loading to zero page or the stack page is not practical, so likely the load address is not correct.
+    # We substitute a low load address.
+    if load_address < 0x200:
+        load_address = 0x200
+
     if big_file:
         # copy from bbc_file to text form (hex bytes) in source/<file>_hex.txt
         hex_text_basename = f"{os.path.basename(bbc_file.host_filepath)}_hex.txt"
