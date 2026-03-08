@@ -18,6 +18,7 @@ Example:
 """
 import errno
 import sys
+import argparse
 from enum import IntFlag
 from typing import BinaryIO
 from collections import deque
@@ -404,12 +405,11 @@ class Writer:
             # temporarily preserved them as non-ASCII UTF-8 characters so they don't
             # parse as the end of a line. Here we convert them back to regular CR
             # and LF for writing to a file.
-            if c == '\u23CE':
-                c = CR
-            elif c == '\u2193':
-                c = LF
-            else:
-                c = ord(c)
+            c = ord(c)
+        if c == '\u23CE' or c == 0x23ce:
+            c = CR
+        elif c == '\u2193' or c == 0x2193:
+            c = LF
         if self.length < len(self.buffer):
             self.buffer[self.length] = c
             self.length += 1
@@ -789,4 +789,4 @@ def main(args: list[str]) -> None:
         sys.exit(1)
 
 if __name__ == "__main__":
-    main(sys.argv)
+    main(sys.argv[1:])

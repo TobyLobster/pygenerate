@@ -20,6 +20,7 @@ import os
 import shutil
 import subprocess
 import sys
+import re
 from typing import TYPE_CHECKING
 
 import bbc_basic_detokenizer
@@ -203,6 +204,28 @@ _BBC_TO_HOST_CHAR_MAP = {
 # Reverse mapping from host filesystem to BBC Micro
 _HOST_TO_BBC_CHAR_MAP = {v: k for k, v in _BBC_TO_HOST_CHAR_MAP.items()}
 
+def _escape_non_printable(s: str) -> str:
+    # Treat printable ASCII (0x20-0x7E) as safe; others become \xNN
+    out = []
+    for ch in s:
+        code = ord(ch)
+        if 0x20 <= code <= 0x7E:
+            # Double ## to indicate a single hash
+            if ch == '#':
+                out.append(ch)
+            out.append(ch)
+        else:
+            out.append(f"#{code:02x}")
+    return ''.join(out)
+
+_hex_escape_re = re.compile(r'#([0-9a-fA-F]{2})')
+
+def _unescape_hex_escapes(s: str) -> str:
+    s = s.replace('##', '#')
+    def repl(match: re.Match) -> str:
+        code = int(match.group(1), 16)
+        return chr(code)
+    return _hex_escape_re.sub(repl, s)
 
 def convert_to_host_filename(bbc_filename: str) -> str:
     """Convert a BBC Micro DFS filename to a host filesystem-safe filename.
@@ -213,6 +236,9 @@ def convert_to_host_filename(bbc_filename: str) -> str:
     result = bbc_filename
     for bbc_char, host_char in _BBC_TO_HOST_CHAR_MAP.items():
         result = result.replace(bbc_char, host_char)
+
+    # Escape any remaining non-printable characters
+    result = _escape_non_printable(result)
     return result
 
 
@@ -224,6 +250,9 @@ def convert_to_bbc_filename(host_filename: str) -> str:
     result = host_filename
     for host_char, bbc_char in _HOST_TO_BBC_CHAR_MAP.items():
         result = result.replace(host_char, bbc_char)
+
+    # Then unescape any #NN sequences back to their bytes/characters
+    result = _unescape_hex_escapes(result)
     return result
 
 
@@ -679,7 +708,7 @@ def add_file(
             content = fh.read()
             bbc_file.length = len(content)
 
-            print(f'Processing file {bbc_file.bbc_filepath}', end='')
+            print(f'Processing file {_escape_non_printable(bbc_file.bbc_filepath)}', end='')
 
             # Check if it's BASIC:
             listing, end_index, success = bbc_basic_detokenizer.decode_basic(content)
