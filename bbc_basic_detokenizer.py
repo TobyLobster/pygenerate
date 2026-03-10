@@ -15,7 +15,8 @@ The public functions are:
 
     decode_basic_file   - give it a filepath of a BASIC program to detokenize
     decode_basic        - give it bytes in memory of a BASIC program to detokenize
-    
+
+TobyLobster
 """
 import sys
 import argparse

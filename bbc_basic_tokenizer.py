@@ -10,11 +10,13 @@ To disable this behaviour add the "--no_escape" argument.
 
 Based on beebasm's 'basic_tokenize.cpp', https://github.com/stardot/beebasm
 
-This file is licensed under the GNU General Public License version 3.
-
 Example:
     with open("program.txt", "rb") as f:
         tokens = tokenize_file(f)
+
+This file is licensed under the GNU General Public License version 3.
+
+TobyLobster
 """
 import errno
 import sys
