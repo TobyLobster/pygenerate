@@ -491,10 +491,12 @@ def main(args: Sequence[str]) -> None:
     original_directory  = os.path.join(config.destination_folder, "original")
     source_directory    = os.path.join(config.destination_folder, "source")
     control_directory   = os.path.join(config.destination_folder, "control")
+    tools_directory     = os.path.join(config.destination_folder, "tools")
 
     make_directory(original_directory)
     make_directory(source_directory)
     make_directory(control_directory)
+    make_directory(tools_directory)
 
     # Extract files from SSD into a list of loose files with .INF files
     files_to_process = []
@@ -552,8 +554,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-import bbc_basic_tokenizer  # For tokenising BASIC programs
-import dfsimage             # For writing BBC disk images
+from tools import bbc_basic_tokenizer  # For tokenising BASIC programs
+from tools import dfsimage             # For writing BBC disk images
 
 
 # Get the full directory path of this script
@@ -715,9 +717,9 @@ def add_file(
 
             print(f'Processing file {_escape_non_printable(bbc_file.bbc_filepath)}', end='')
 
-            # Check if it's BASIC:
+            # Check if it's BASIC (and not just the null BASIC program encoded as '0D FF'):
             listing, end_index, success = bbc_basic_detokenizer.decode_basic(content)
-            if success:
+            if success and end_index > 2:
                 # BASIC program found
                 basic_txt = "".join(listing)
 
@@ -818,9 +820,13 @@ def add_file(
         build_script += f"    add_file(image, script_dir / 'build' / 'disc' / {repr(os.path.basename(bbc_file.host_filepath))}, {repr(bbc_file.bbc_filepath)}, load_addr=0x{bbc_file.load_address:06x}, exec_addr=0x{bbc_file.exec_address:06x}, locked={bbc_file.locked})\n"
 
     # Copy dfsimage and basic tokenizer
-    shutil.copytree(os.path.join(script_dir, "dfsimage"), os.path.join(config.destination_folder, "dfsimage"), dirs_exist_ok=True)
-    safe_copy(os.path.join(script_dir, "bbc_basic_tokenizer.py"), os.path.join(config.destination_folder, "bbc_basic_tokenizer.py"))
+    shutil.copytree(os.path.join(script_dir, "dfsimage"), os.path.join(tools_directory, "dfsimage"), dirs_exist_ok=True)
+    safe_copy(os.path.join(script_dir, "bbc_basic_tokenizer.py"), os.path.join(tools_directory, "bbc_basic_tokenizer.py"))
 
+    # Create tools/__init__.py
+    with open(os.path.join(tools_directory, "__init__.py"), "w") as fh:
+        fh.write("# __init__.py")
+    
     # Write the build script
     with open(os.path.join(config.destination_folder, "build.py"), "w") as fh:
         fh.write(build_script)
