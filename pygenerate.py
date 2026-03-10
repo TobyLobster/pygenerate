@@ -233,12 +233,12 @@ def convert_to_host_filename(bbc_filename: str) -> str:
     Replaces characters that are invalid on common filesystems (e.g., /, ?, <, >)
     with safe placeholders like #slash, #question, etc.
     """
-    result = bbc_filename
+    # First escape any non-printable characters
+    result = _escape_non_printable(bbc_filename)
+
     for bbc_char, host_char in _BBC_TO_HOST_CHAR_MAP.items():
         result = result.replace(bbc_char, host_char)
 
-    # Escape any remaining non-printable characters
-    result = _escape_non_printable(result)
     return result
 
 

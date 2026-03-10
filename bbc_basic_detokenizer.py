@@ -442,12 +442,12 @@ def decode_basic(file_data: bytes, output_file_should_escape_chars: bool = True,
                 #
                 # So if we find the letters that happen match a keyword, we check 
                 # that we can round trip the detokenize and tokenize. If it doesn't 
-                # round trip correctly, then we can mark it up as e.g. \{"IF"} 
-                # to avoid any tokenization.
+                # round trip correctly, then we mark it up as e.g. \{"IF"} to
+                # avoid any tokenization.
                 #
                 # We also check for abbreviations of keywords too, such as "RET." 
                 # which appears in e.g. Land of Chark (https://bbcmicro.co.uk/game.php?id=1657)
-                # even though it looks to be erroneous BASIC code.
+                # We handle this, even though that looks to be erroneous BASIC code.
 
                 # Check if there is the text of a keyword present here
                 match = next((s.decode("ascii") for s in TOKENS_REV if file_data[i:].startswith(s)), None)
@@ -477,15 +477,37 @@ def decode_basic(file_data: bytes, output_file_should_escape_chars: bool = True,
                             listing.append(f"ERROR: Could not detokenize {byte} and get a valid round trip with possible keyword '{match}'")
                             return listing, i, False
                 else:
-                    # No potential keyword found. Output a regular character.
-                    
+                    # No potential keyword found. 
+
                     # We check for a digit at the start of the line. If so it should 
                     # be marked up in quotes to separate it from the line number.
                     # This is seen in Minefield (Graphic Research Ltd) (https://bbcmicro.co.uk/game.php?id=1900)
-                    # even though that code looks to be erroneous BASIC code.
+                    # We handle this, even though that code looks to be erroneous BASIC code.
                     if start_of_line and _is_digit(byte):
                         decoded.extend(list_of_ascii_bytes('\\{"' + chr(byte) + '"}'))
+                    elif _is_digit(byte):
+                        # Castle Blacknight (https://bbcmicro.co.uk/explore.php?id=2268) contains GOTO 
+                        # statements with ASCII character digits as the line numbers. Normally BASIC 
+                        # tokenises line numbers.
+
+                        # First, find the full range of all the digits
+                        word = chr(file_data[i])
+                        j = i+1
+                        while (j < file_length) and _is_digit(file_data[j]):
+                            word += chr(file_data[j])
+                            j+=1
+
+                        # Check if retokenizing results in the same ASCII digits we expect. 
+                        # If it doesn't, then the number was erroneously tokenised. 
+                        # We mark up the number as explicit ASCII characters instead.
+                        if not round_trip_works(decoded, list_of_ascii_bytes(word), list_of_ascii_bytes(word)):
+                            decoded.extend(list_of_ascii_bytes('\\{"' + word + '"}'))
+                            i += len(word)-1
+                        else:
+                            # Output a regular character.
+                            decoded.extend(escape(byte, output_file_should_escape_chars))
                     else:
+                        # Output a regular character.
                         decoded.extend(escape(byte, output_file_should_escape_chars))
 
             # Toggle quote state

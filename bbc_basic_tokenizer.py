@@ -559,7 +559,7 @@ def tokenize_line_contents(reader: Reader, writer: Writer) -> None:
     writing tokenized output to the writer.
     """
     start_of_line = True
-    tokenize_numbers = False
+    tokenize_numbers = True
 
     while True:
         c = reader.current_char()
@@ -613,7 +613,7 @@ def tokenize_line_contents(reader: Reader, writer: Writer) -> None:
             continue
 
         if _is_dot_digit(c):
-            if c != '.' and tokenize_numbers:
+            if c != '.' and tokenize_numbers and not reader.dont_tokenize:
                 _tokenize_linenum(reader, writer)
                 continue
             _skip_write(_is_dot_digit, reader, writer)
