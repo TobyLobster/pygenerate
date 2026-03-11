@@ -35,83 +35,62 @@ UNICODE_POUND = "\u00A3"
 
 global readme_content
 
-readme_content = """# The code to assemble '<TITLE>'
+readme_content = """# Building '<TITLE>'
 
 ## Overview
-The python build script 'build.py' creates the files and an SSD disk image file 
-for '<TITLE>' for the BBC Micro. It processes source files to create binary 
-BASIC, text, machine code, and any other data files.
+The Python build script `build.py` creates the files and SSD disk image for *<TITLE>* on the BBC Micro. It processes source files to produce binary BASIC, text, machine code, and other data files.
 
 ## Requirements
-* python3
+* Python 3
 * The <ASSEMBLER> assembler
-* The py8dis disassembler (a recent version)
+* A recent version of the py8dis disassembler
 
-If you can call each of these tools on the command line, you are ready to go.
+If each of these tools is callable from the command line, you're ready to go.
 
 ## Usage
     python3 build.py
 
 ## Directory structure
 
-    build/              intermediate files created when building
-    build/disc          the files for the final SSD
-    build.py            python script to build the files and the SSD
-    control/            python scripts to control the disassembly of binary files
-    original/           the original files we are trying to replicate
+    build/              intermediate files created during the build
+    build/disc/         files destined for the final SSD
+    build.py            the main build script
+    control/            Python scripts that control disassembly of binary files
+    original/           original files being replicated
     readme.md           this file
-    source/             source code used to create the final files and SSD
-    tools/              the python libraries used by the build process
+    source/             source code for each file on the disc
+    tools/              Python libraries used by the build process
 
-The source/ folder contains the editable source code for each file on the disc. 
-This can include detokenized BASIC text, plain text files, assembly language and 
-binary data as ASCII hex digits.
+The `source/` folder contains editable source code for each file on the disc: detokenized BASIC text, plain text, assembly language, and binary data encoded as ASCII hex.
 
-That said however, beware: the asm files are always overwritten when building. 
-This is because it's expected that the control/ files will be repeatedly updated 
-to control the disassembly being output. For example, adding label names to 
-addresses, and adding commentary. This is py8dis working, disassembling the 
-binary to help make sense of the file.
+Note that `.asm` files are always overwritten during the build, because the `control/` scripts are expected to be updated iteratively — adding label names and commentary as py8dis disassembles the binary and makes the code easier to understand.
 
-When the source has been sufficiently annotated in this fashion, then either the
-project is complete, or if the user wants to make changes to the asm, to make
-improvements or fix bugs for example, then they can remove the calls to 
-disassemble() from build.py, and the asm files along with the others become 
-regular source files that can be changed as needed manually.
+Once the source is sufficiently annotated, the project is either complete, or — if you want to make changes such as improvements or bug fixes — you can remove the `disassemble()` calls from `build.py`, at which point the `.asm` files become regular source files that can be edited freely.
 
-Any BASIC files are stored as regular 7 bit ASCII text files in source/. 
-They become tokenized into binary BASIC programs when built. Some BASIC programs 
-have non-printable characters, and these are handled with mark-up. Further markup 
-allows for non-standard tokenization found in some BASIC programs, such as 
-might be used by e.g. BASIC compressors, obfuscators or optimizers. See below 
-for more file format details. Some BASIC files also have binary code and/or data 
-directly following within the same file, and these are also handled. The 
-tokenized BASIC binary file is 'included' at the start of an assembly language 
-source file that continues with the remaining bytes of code / data.
+BASIC files are stored as plain 7-bit ASCII text in `source/` and tokenized into binary BASIC programs at build time. Non-printable characters are handled with markup, as are non-standard tokenization schemes used by BASIC compressors, obfuscators, or optimizers (see File formats below). Where a BASIC file also contains binary code or data, the tokenized binary is assembled at the start of an assembly source file that continues with the remaining bytes.
 
-Text files in the source/ folder are converted from the host OS line endings 
-to BBC Micro compatible line endings as part of the build. 
+Text files in `source/` have their line endings converted from the host OS convention to BBC Micro carriage returns (ASCII 13) during the build.
 
-Any particularly large binary files (over 64k) are stored in the source folder 
-as ASCII hex, and converted to binary as part of the build process. (We treat 
-these rare files separately, as most assemblers can't handle files over 64k).
+Binary files larger than 64 KB are stored as ASCII hex and converted to binary at build time, since most assemblers cannot handle files above this threshold.
+
+---
 
 ## File formats
 
 ### BASIC
-The source/ file contains the text of the BASIC program as it would be typed at
-the BASIC prompt. The exceptions to this role are markup, e.g.:
+The source/ file contains the text of the BASIC program as it would be typed at the BASIC prompt, with the following exceptions:
 
-    \\x87    - adds a non-printable byte to the BASIC file (e.g. For MODE 7 graphics in a PRINT statement.)
-    \\{IF}   - adds the token byte for the 'IF' keyword, even if this would not normally be tokenized if entered at the BASIC prompt
-    \\{"IF"} - adds the ASCII values for 'I' then 'F' even if it would normally be tokenized if entered at the BASIC prompt
-    \\\\      - adds a single backslash
+| Markup    | Meaning |
+| --------- | ------- |
+| `\\x87`    | Inserts a non-printable byte (e.g. for MODE 7 graphics in a `PRINT` statement) |
+| `\\{IF}`   | Inserts the token byte for `IF`, even where it would not normally be tokenized |
+| `\\{"IF"}` | Inserts the ASCII values for `I` and `F`, even where the keyword would normally be tokenized |
+| `\\\\`      | Inserts a single backslash |
 
 ### Text
-Plain text but with the newline characters (ASCII 13) that are expected on the 
-BBC Micro replaced with the native host OS's line separator. This keeps the text
-cleanly editable on the host system. The build process restores the expected 
-newlines for the final file.
+Source files use the host OS's native line endings in place of the BBC Micro's carriage returns (ASCII 13). The build process restores the correct line endings for the final file.
+
+---
 
 ## Filenames
 BBC Micro filenames can contain characters that are not available on the host os
@@ -120,18 +99,20 @@ os and convert back when writing to the SSD.
 
 Table of 'problem' characters for filenames and their replacements:
 
-    | ----- | ------------- | 
-    |     / | #slash        | 
-    |     ? | #question     | 
-    |     < | #less         | 
-    |     > | #greater      | 
-    |     \\ | #backslash    | 
-    |     : | #colon        |  
-    |     * | #star         | 
-    |    \\| | #bar          | 
-    |     " | #quote        | 
-    |     # | ##            |
-    | ----- | ------------- | 
+    | Character | Substitute    |
+    | --------- | ------------- | 
+    |     /     | #slash        | 
+    |     ?     | #question     | 
+    |     <     | #less         | 
+    |     >     | #greater      | 
+    |     \\     | #backslash    | 
+    |     :     | #colon        |  
+    |     *     | #star         | 
+    |    \\|     | #bar          | 
+    |     "     | #quote        | 
+    |     #     | ##            |
+
+---
 """
 
 # Standard load address for sideways ROMs
@@ -466,7 +447,7 @@ def show_usage() -> None:
     print("    'py8dis' (https://github.com/ZornsLemma/py8dis) to be visible to Python, e.g. in PYTHONPATH or in the same directory as this python script.")
     print("    'beebasm' or 'acme' assembler (https://github.com/stardot/beebasm/ or https://sourceforge.net/projects/acme-crossass/)")
     print("")
-    print("USAGE: pygenerate <filepath to ssd> {--acme} {--beebasm}")
+    print("USAGE: pygenerate <filepath to ssd> [--acme|--beebasm]")
 
 # write bytes from binary file as plain hex values (one line or configurable)
 def bin_to_hextext(src_path: str, dst_path: str, bytes_per_line: int = 16, uppercase: bool = False) -> None:
@@ -634,7 +615,7 @@ def main(args: Sequence[str]) -> None:
         assemble = """args = ['acme', '--symbollist', script_dir / 'build' / f'{{asm_filename}}_symbols.txt', '-r', report_filepath, '-o', str(binary_filepath_full), str(asm_filepath_full)]
     run_subprocess(args, 'assembly failed', script_dir)"""
     elif config.assembler == "beebasm":
-        assemble = """args = ['beebasm', '-o', str(binary_filepath_full), '-i', str(asm_filepath_full)]
+        assemble = """args = ['beebasm', '-o', str(binary_filepath_full), '-i', str(asm_filepath_full), '-v']
 
     report = run_subprocess(args, 'assembly failed', script_dir)
     with open(report_filepath, 'wb') as f:
@@ -662,6 +643,8 @@ from tools import dfsimage             # For writing BBC disk images
 # Get the full directory path of this script
 script_dir = Path(__file__).resolve().parent
 
+
+# Helper functions
 def hextext_to_bin(src_path: str, dst_path: str) -> None:
     \"\"\"
     Read a text file containing hexadecimal byte values (space or newline separated)
@@ -704,7 +687,7 @@ def run_subprocess(args: list[str], error_message: str, cwd: Path | None = None)
 
 
 def disassemble(python_filepath: str, asm_filepath: str) -> None:
-    \"\"\"Run a Python control script to create BeebAsm assembly files.
+    \"\"\"Run a Python control script to create assembly files.
 
     Args:
         python_filepath: Relative path to the control script (within 'control' dir).
@@ -733,7 +716,7 @@ def make_inf(binary_filepath: Path, bbc_bin_filename: str, load_address: int, ex
 
 
 def assemble(asm_filepath: str, binary_filepath: str) -> None:
-    \"\"\"Assemble a BeebAsm source file to a binary.
+    \"\"\"Assemble a source file to a binary.
 
     Args:
         asm_filepath: Relative path to the assembly source (within 'source' dir).
@@ -805,6 +788,7 @@ def add_file(
         locked=locked,
         replace=True,
     )
+
 
 # Make build/disc directory
 (script_dir / 'build' / 'disc').mkdir(parents=True, exist_ok=True)
