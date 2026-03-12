@@ -155,7 +155,7 @@ class BBCMicroFile:
             if (self.exec_address >= r[0]) and (self.exec_address < (r[0] + r[1])):
                 return False
         # Check the exec address is non-zero and within the range of the load address and length
-        return (self.load_address & 0xffff != 0) and (self.exec_address & 0xffff != 0) and (self.exec_address & 0xffff >= self.load_address & 0xffff) and (self.exec_address & 0xffff < (self.load_address & 0xffff + self.length))
+        return (self.load_address & 0xffff != 0) and (self.exec_address & 0xffff != 0) and (self.exec_address & 0xffff >= self.load_address & 0xffff) and (self.exec_address & 0xffff < ((self.load_address & 0xffff) + self.length))
 
 class Config:
     """Configuration settings for the pygenerate tool.
