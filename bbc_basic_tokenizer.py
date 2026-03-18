@@ -519,8 +519,8 @@ def _parse_keyword(reader: Reader, writer: Writer) -> _Keyword | None:
         reader.next_char()
         for keyword in _keyword_list:
             if keyword.token == token:
-                return keyword
-        return None
+                return (keyword, True)
+        return (None, False)
 
     for keyword in _keyword_list:
         if not match_count or (match_count <= len(keyword.name) and match_name[:match_count] == keyword.name[:match_count]):
@@ -537,11 +537,11 @@ def _parse_keyword(reader: Reader, writer: Writer) -> _Keyword | None:
                             # Keyword with flag C is not valid as it's followed by alphanumeric,
                             # we just write out the ASCII letters.
                             break
-                    return keyword
+                    return (keyword, False)
 
                 if reader.current_char() == '.':
                     reader.next_char()
-                    return keyword
+                    return (keyword, False)
 
 
     if match_count:
@@ -551,7 +551,7 @@ def _parse_keyword(reader: Reader, writer: Writer) -> _Keyword | None:
             _skip_write(_is_alpha_digit, reader, writer)
     else:
         _skip_write(_is_alpha_digit, reader, writer)
-    return None
+    return (None, None)
 
 
 def tokenize_line_contents(reader: Reader, writer: Writer) -> None:
@@ -630,42 +630,43 @@ def tokenize_line_contents(reader: Reader, writer: Writer) -> None:
             reader.next_char()
             continue
 
-        keyword = _parse_keyword(reader, writer)
-        if not keyword:
+        keyword, is_marked_up_keyword = _parse_keyword(reader, writer)
+        if keyword is None:
             start_of_line = False
             tokenize_numbers = False
             continue
-        else:
-            token = keyword.token
-            flags = keyword.flags
 
-            if (flags & KeywordFlags.C) and _is_alpha_digit(reader.current_char()):
-                start_of_line = False
-                tokenize_numbers = False
-                continue
+        # Found keyword
+        token = keyword.token
+        flags = keyword.flags
 
-            if (flags & KeywordFlags.P) and start_of_line:
-                token += 0x40
+        if (flags & KeywordFlags.C) and _is_alpha_digit(reader.current_char()) and not is_marked_up_keyword:
+            start_of_line = False
+            tokenize_numbers = False
+            continue
 
-            writer.write(token)
+        if (flags & KeywordFlags.P) and start_of_line:
+            token += 0x40
 
-            if flags & KeywordFlags.M:
-                start_of_line = False
-                tokenize_numbers = False
+        writer.write(token)
 
-            if flags & KeywordFlags.S:
-                start_of_line = True
-                tokenize_numbers = False
+        if flags & KeywordFlags.M:
+            start_of_line = False
+            tokenize_numbers = False
 
-            if flags & KeywordFlags.F:
-                _skip_write(_is_alpha_digit, reader, writer)
+        if flags & KeywordFlags.S:
+            start_of_line = True
+            tokenize_numbers = False
 
-            if flags & KeywordFlags.L:
-                tokenize_numbers = True
+        if flags & KeywordFlags.F:
+            _skip_write(_is_alpha_digit, reader, writer)
 
-            if flags & KeywordFlags.R:
-                _skip_write(_is_not_cr, reader, writer)
-                return
+        if flags & KeywordFlags.L:
+            tokenize_numbers = True
+
+        if flags & KeywordFlags.R:
+            _skip_write(_is_not_cr, reader, writer)
+            return
 
 
 def tokenize_line(reader: Reader, writer: Writer, previous_line_number: int, tokenized: list[int]) -> int:
