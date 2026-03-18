@@ -35,15 +35,15 @@ UNICODE_POUND = "\u00A3"
 
 global readme_content
 
-readme_content = """# Building '<TITLE>'
+readme_content = """# '<TITLE>'
 
 ## Overview
-The Python build script `build.py` creates the files and SSD disk image for *<TITLE>* on the BBC Micro. It processes source files to produce binary BASIC, text, machine code, and other data files.
+The Python build script `build.py` creates the files and SSD disk image for *<TITLE>* on the BBC Micro.
 
 ## Requirements
 * Python 3
 * The <ASSEMBLER> assembler
-* A recent version of the py8dis disassembler
+* A recent version of the [py8dis](https://github.com/ZornsLemma/py8dis) disassembler
 
 If each of these tools is callable from the command line, you're ready to go.
 
@@ -61,58 +61,8 @@ If each of these tools is callable from the command line, you're ready to go.
     source/             source code for each file on the disc
     tools/              Python libraries used by the build process
 
-The `source/` folder contains editable source code for each file on the disc: detokenized BASIC text, plain text, assembly language, and binary data encoded as ASCII hex.
-
-Note that `.asm` files are always overwritten during the build, because the `control/` scripts are expected to be updated iteratively — adding label names and commentary as py8dis disassembles the binary and makes the code easier to understand.
-
-Once the source is sufficiently annotated, the project is either complete, or — if you want to make changes such as improvements or bug fixes — you can remove the `disassemble()` calls from `build.py`, at which point the `.asm` files become regular source files that can be edited freely.
-
-BASIC files are stored as plain 7-bit ASCII text in `source/` and tokenized into binary BASIC programs at build time. Non-printable characters are handled with markup, as are non-standard tokenization schemes used by BASIC compressors, obfuscators, or optimizers (see File formats below). Where a BASIC file also contains binary code or data, the tokenized binary is assembled at the start of an assembly source file that continues with the remaining bytes.
-
-Text files in `source/` have their line endings converted from the host OS convention to BBC Micro carriage returns (ASCII 13) during the build.
-
-Binary files larger than 64 KB are stored as ASCII hex and converted to binary at build time, since most assemblers cannot handle files above this threshold.
-
----
-
-## File formats
-
-### BASIC
-The source/ file contains the text of the BASIC program as it would be typed at the BASIC prompt, with the following exceptions:
-
-| Markup    | Meaning |
-| --------- | ------- |
-| `\\x87`    | Inserts a non-printable byte (e.g. for MODE 7 graphics in a `PRINT` statement) |
-| `\\{IF}`   | Inserts the token byte for `IF`, even where it would not normally be tokenized |
-| `\\{"IF"}` | Inserts the ASCII values for `I` and `F`, even where the keyword would normally be tokenized |
-| `\\\\`      | Inserts a single backslash |
-
-### Text
-Source files use the host OS's native line endings in place of the BBC Micro's carriage returns (ASCII 13). The build process restores the correct line endings for the final file.
-
----
-
-## Filenames
-BBC Micro filenames can contain characters that are not available on the host os
-filesystem. We convert any troublesome characters when storing them on the host 
-os and convert back when writing to the SSD.
-
-Table of 'problem' characters for filenames and their replacements:
-
-    | Character | Substitute    |
-    | --------- | ------------- | 
-    |     /     | #slash        | 
-    |     ?     | #question     | 
-    |     <     | #less         | 
-    |     >     | #greater      | 
-    |     \\     | #backslash    | 
-    |     :     | #colon        |  
-    |     *     | #star         | 
-    |    \\|     | #bar          | 
-    |     "     | #quote        | 
-    |     #     | ##            |
-
----
+## The `source/` folder
+The `source/` folder contains the editable source for each file on the disc.
 """
 
 # Standard load address for sideways ROMs
@@ -627,7 +577,7 @@ def main(args: Sequence[str]) -> None:
 This script:
 - Disassembles the binaries using control files (see py8dis) into {config.assembler} assembly
 - Assembles them back into binaries
-- Tokenizes BBC BASIC programs from text files
+- Tokenizes any BBC BASIC programs from text files
 - Packages everything into an SSD disk image
 \"\"\"
 
@@ -794,6 +744,8 @@ def add_file(
 (script_dir / 'build' / 'disc').mkdir(parents=True, exist_ok=True)
 """
 
+    file_types_present = set()
+
     # Process each file, creating a control script for each binary we need to deal with
     for bbc_file in files_to_process:
         with open(bbc_file.host_filepath, "rb") as fh:
@@ -806,6 +758,7 @@ def add_file(
             listing, end_index, success = bbc_basic_detokenizer.decode_basic(content)
             if success and end_index > 2:
                 # BASIC program found
+                file_types_present.add("BASIC")
                 basic_txt = "".join(listing)
 
                 # Write the BASIC text out to source folder
@@ -830,6 +783,7 @@ def add_file(
                 build_script += f"source_filepath = script_dir / 'source' / {repr(os.path.basename(bbc_file.source_filepath))}\n"
                 build_script += f"destination_filepath = script_dir / 'build' / 'disc' / {repr(os.path.basename(bbc_file.host_filepath))}\n"
                 if needs_assembly:
+                    file_types_present.add("BASIC+Asm")
                     build_script += f"tokenized_basic = script_dir / 'build' / {repr(os.path.basename(bbc_file.host_filepath) + '_basic')}\n"
                     build_script += f'tokenize_basic(source_filepath, tokenized_basic)\n'
 
@@ -849,6 +803,8 @@ def add_file(
 
             elif is_totally_printable(content):
                 print(" as text")
+                file_types_present.add("Text")
+
                 # Write the current file content into a file in source_directory, with carriage returns converted to the host OS line ending
                 bbc_file.source_filepath = os.path.join(source_directory, os.path.basename(bbc_file.host_filepath) + ".txt")
                 with open(bbc_file.source_filepath, "wb") as fh:
@@ -864,17 +820,19 @@ def add_file(
                     print(" as machine code")
                 else:
                     print(" as binary data")
+
                 # Disassemble
                 # Add to python control script that will invoke py8dis to disassemble the file
-                # For tempest: move(0x0a00, 0x1900, 0x4300-0x1900)
 
                 asm_file = f"{os.path.basename(bbc_file.host_filepath)}_{config.assembler}.asm"
                 build_script_result, big_file = handle_code(content, bbc_file, source_directory, control_directory, asm_file, [])
 
                 if big_file:
                     build_script += f'\n# Create hex file {bbc_file.bbc_filepath}\n'
+                    file_types_present.add("BigHex")
                 else:
                     build_script += f'\n# Create binary {bbc_file.bbc_filepath}\n'
+                    file_types_present.add("ASM")
                 build_script += f"destination_filepath = script_dir / 'build' / 'disc' / {repr(os.path.basename(bbc_file.host_filepath))}\n"
                 build_script += build_script_result
 
@@ -916,13 +874,63 @@ def add_file(
     with open(os.path.join(config.destination_folder, "build.py"), "w") as fh:
         fh.write(build_script)
 
+    # Construct and write the README.md file
     global readme_content
+    readme_content_full = readme_content
 
-    # Write the README.md file
-    readme_content = readme_content.replace("<ASSEMBLER>", config.assembler)
-    readme_content = readme_content.replace("<TITLE>", ssd_title)
+    if 'ASM' in file_types_present or 'BASIC+Asm' in file_types_present:
+        readme_content_full += """
+### Assembly files
+The `.asm` files in `source/` are overwritten during the build, because the binary files in `original/` are disassembled to the `.asm` files. 
+The scripts in `control/` are expected to be updated iteratively — adding label names and commentary as `py8dis` repeatedly disassembles the binary making the code easier to understand each time. 
+Once the source is sufficiently annotated, the `disassemble()` calls in `build.py` can be removed (as can the `control/` and `original/` folders) at which point the `.asm` files become regular source files that can be edited freely.
+"""
+    if 'BASIC' in file_types_present:
+        readme_content_full += """
+### BASIC
+BASIC files are stored as pure 7-bit ASCII text in `source/` as they would be typed at the BASIC prompt, with the following exceptions:
+
+| Markup    | Meaning |
+| --------- | ------- |
+| `\\x87`    | Inserts a non-printable byte (e.g. for MODE 7 graphics in a `PRINT` statement) |
+| `\\{IF}`   | Inserts the token byte for `IF`, even where it would not normally be tokenized by BASIC |
+| `\\{"IF"}` | Inserts the ASCII values for `I` and `F`, even where the keyword would normally be tokenized by BASIC |
+| `\\\\`      | Inserts a single backslash |
+"""
+    if 'BASIC+Asm' in file_types_present:
+        readme_content_full += """
+BASIC files with binary content following are combined in the build by first tokenising the BASIC code, then including this binary data at the start of the `.asm` code.
+"""
+
+    if 'Text' in file_types_present:
+        readme_content_full += """
+### Text
+Text files in `source/` have the native OS line endings, which are converted to BBC Micro carriage returns (ASCII 13) during the build.
+"""
+   
+    if 'BigHex' in file_types_present:
+        readme_content_full += """
+### Large binary files
+Binary files larger than 64 KB are stored as ASCII hex and converted to binary at build time, since most assemblers cannot handle files above this threshold.
+""" 
+
+    # Replace parts in the README
+    assembler_url = None
+    if config.assembler == "beebasm":
+        assembler_url = "https://github.com/stardot/beebasm/"
+    elif config.assembler == "acme":
+        assembler_url = "https://sourceforge.net/projects/acme-crossass/"
+
+    if assembler_url:
+        readme_content_full = readme_content_full.replace("<ASSEMBLER>", f"[{config.assembler}]({assembler_url})")
+    else:
+        readme_content_full = readme_content_full.replace("<ASSEMBLER>", config.assembler)
+
+    readme_content_full = readme_content_full.replace("<TITLE>", ssd_title)
+    
+    # Write the README.md
     with open(os.path.join(config.destination_folder, "README.md"), "w") as fh:
-        fh.write(readme_content)
+        fh.write(readme_content_full)
 
 if __name__ == "__main__":
     main(sys.argv[1:])

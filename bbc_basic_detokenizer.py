@@ -324,7 +324,7 @@ def decode_basic(file_data: bytes, output_file_should_escape_chars: bool = True,
     while i < file_length:
         # Each line starts with CR (13)
         if file_data[i] != LINE_START_BYTE:
-            listing.append("Bad Program (expected ^M at start of line).")
+            listing.append(f"Bad Program (expected ^M at start of line) at file offset {hex(i)}.")
             return listing, i, False
         i += 1
 
@@ -431,7 +431,7 @@ def decode_basic(file_data: bytes, output_file_should_escape_chars: bool = True,
                     decoded.extend(token_string_marked_up_lhs)
                 else:
                     # Error out
-                    listing.append(f"ERROR: Could not detokenize {byte} and get a valid round trip")
+                    listing.append(f"ERROR: Could not detokenize {byte} and get a valid round trip, at file offset {hex(i)}")
                     return listing, i, False
             else:
                 # Not a token, just ASCII

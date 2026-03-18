@@ -515,7 +515,7 @@ def _parse_keyword(reader: Reader, writer: Writer) -> _Keyword | None:
     match_name = None
     
     if reader.is_marked_up_tokenised_keyword:
-        token = reader.current_char()
+        token = ord(reader.current_char())
         reader.next_char()
         for keyword in _keyword_list:
             if keyword.token == token:
