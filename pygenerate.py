@@ -414,6 +414,24 @@ def bin_to_hextext(src_path: str, dst_path: str, bytes_per_line: int = 16, upper
             line = " ".join(fmt.format(b) for b in chunk)
             fout.write(line + "\n")
 
+def rationalize_load_address(bbc_file):
+    # Check for a bad load address, one that goes beyond the end of memory. Make up a low load address if so.
+    # If it's still too big, then we treat it separately
+    big_file = False
+    if ((bbc_file.load_address & 0xffff) + bbc_file.length) >= 0x10000:
+        load_address = 0x200
+        if (load_address + bbc_file.length) >= 0x10000:
+            big_file = True
+    else:
+        load_address = bbc_file.load_address & 0xffff
+
+    # Loading to zero page or the stack page is not practical, so likely the load address is not correct.
+    # We substitute a low load address.
+    if load_address < 0x200:
+        load_address = 0x200
+
+    return (load_address, big_file)
+
 def handle_code(content, bbc_file, source_directory, control_directory, asm_file, basic_memory_ranges):
     control_filepath = os.path.join(control_directory, os.path.basename(bbc_file.host_filepath) + ".py")
     host_filepath_relative_to_script = os.path.relpath(bbc_file.host_filepath, control_directory)
@@ -435,19 +453,8 @@ acorn.bbc()
 
 """
     # Check for a bad load address, one that goes beyond the end of memory. Make up a low load address if so.
-    # If it's still too big, then treat it separately
-    big_file = False
-    if ((bbc_file.load_address & 0xffff) + bbc_file.length) >= 0x10000:
-        load_address = 0x200
-        if (load_address + bbc_file.length) >= 0x10000:
-            big_file = True
-    else:
-        load_address = bbc_file.load_address & 0xffff
-
-    # Loading to zero page or the stack page is not practical, so likely the load address is not correct.
-    # We substitute a low load address.
-    if load_address < 0x200:
-        load_address = 0x200
+    # If it's still too big, then we treat it separately
+    load_address, big_file = rationalize_load_address(bbc_file)
 
     if big_file:
         # copy from bbc_file to text form (hex bytes) in source/<file>_hex.txt
@@ -776,7 +783,11 @@ def add_file(
                     print(f" as BASIC")
 
                 # We only support one BASIC snippet per file currently
-                basic_snippet = [(bbc_file.load_address & 0xffff, end_index)]
+
+                # Check for a bad load address, one that goes beyond the end of memory. Make up a low load address if so.
+                # If it's still too big, then we treat it separately
+                load_address, big_file = rationalize_load_address(bbc_file)
+                basic_snippet = [(load_address, end_index)]
 
                 # Convert to BASIC II format on disc
                 build_script += f'\n# Create BASIC file {bbc_file.bbc_filepath}\n'
@@ -893,9 +904,12 @@ BASIC files are stored as pure 7-bit ASCII text in `source/` as they would be ty
 | Markup    | Meaning |
 | --------- | ------- |
 | `\\x87`    | Inserts a non-printable byte (e.g. for MODE 7 graphics in a `PRINT` statement) |
-| `\\{IF}`   | Inserts the token byte for `IF`, even where it would not normally be tokenized by BASIC |
+| `\\{IF}`   | Inserts the keyword token byte for `IF`, even where it would not normally be tokenized by BASIC |
 | `\\{"IF"}` | Inserts the ASCII values for `I` and `F`, even where the keyword would normally be tokenized by BASIC |
+| `\\{54321}` | Tokenizes a line number even if it would not normally be tokenized by BASIC |
 | `\\\\`      | Inserts a single backslash |
+
+If the file ends with a line `\\xCC` this denotes the terminator byte, which by default is FF, but can be any top bit set character.
 """
     if 'BASIC+Asm' in file_types_present:
         readme_content_full += """

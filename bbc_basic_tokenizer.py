@@ -235,6 +235,19 @@ def get_token_from_keyword_string(keyword: str) -> int | None:
             return key.token
     return None
 
+def get_line_number_encoding(line_number: int):
+    return [LINE_NUMBER_TOKEN,
+            (((line_number & 0xC000) >> 12) | ((line_number & 0xC0) >> 2)) ^ 0x54,
+            (line_number & 0x3F) | 0x40,
+            (line_number >> 8) | 0x40]
+
+def parse_int(s: str) -> int | None:
+    try:
+        return int(s)
+    except (ValueError, TypeError):
+        return None
+    
+
 class Reader:
     """Buffered character reader that normalizes line endings.
 
@@ -326,10 +339,21 @@ class Reader:
                                 if c == b'}':
                                     c = get_token_from_keyword_string(keyword_string)
                                     if c is None:
-                                        raise TokenizeError(self.line_number(), f"Escaped token '{keyword_string}' is not known")
+                                        line_num = parse_int(keyword_string)
+                                        if line_num is None:
+                                            raise TokenizeError(self.line_number(), f"Escaped token '{keyword_string}' is not known")
+
+                                        # add the encoded line number to the cached characters
+                                        encoded = get_line_number_encoding(line_num)
+                                        for i in encoded:
+                                            self._cached_chars.append(chr(i))
+                                        c = self._cached_chars.popleft()
+                                        return(ord(c), True, False)
+                                        
                                     return (c, False, True)
                                 keyword_string += c.decode("ascii")
                                 c = self.file.read(1)
+
                             if c is None:
                                 raise TokenizeError(self.line_number(), f"Unfinished escaped token '{keyword_string}'")
             if c:
@@ -492,10 +516,9 @@ def _tokenize_linenum(reader: Reader, writer: Writer) -> None:
         index += 1
         reader.next_char()
 
-    writer.write(LINE_NUMBER_TOKEN)
-    writer.write((((acc & 0xC000) >> 12) | ((acc & 0xC0) >> 2)) ^ 0x54)
-    writer.write((acc & 0x3F) | 0x40)
-    writer.write((acc >> 8) | 0x40)
+    encoded_line_number = get_line_number_encoding(acc)
+    for entry in encoded_line_number:
+        writer.write(entry)
     return
 
 
@@ -685,6 +708,8 @@ def tokenize_line(reader: Reader, writer: Writer, previous_line_number: int, tok
         TokenizeError: If tokenization fails (e.g., line too long,
             line numbers out of order or out of range).
     """
+    terminating_character = 0xff
+
     # Skip leading spaces
     while reader.current_char() == ' ':
         reader.next_char()
@@ -709,6 +734,10 @@ def tokenize_line(reader: Reader, writer: Writer, previous_line_number: int, tok
             print(f"WARNING: Line numbers are not in order: line {line_number} occurs after line {previous_line_number}.")
     else:
         line_number = previous_line_number + 1 if previous_line_number >= 0 else 1
+        if ord(reader.current_char()) >= 128:
+            # Found terminating character
+            terminating_character = ord(reader.current_char())
+            return line_number, terminating_character
     previous_line_number = line_number
 
     # Check for line numbers out of range
@@ -728,7 +757,7 @@ def tokenize_line(reader: Reader, writer: Writer, previous_line_number: int, tok
     if writer.length >= 4:
         tokenized.extend(writer.data())
 
-    return previous_line_number
+    return previous_line_number, terminating_character
 
 
 def tokenize_file(file: BinaryIO, input_file_contains_escaped_chars: bool = True) -> list[int]:
@@ -751,11 +780,11 @@ def tokenize_file(file: BinaryIO, input_file_contains_escaped_chars: bool = True
 
     tokenized: list[int] = []
     while not reader.is_end():
-        previous_line_number = tokenize_line(reader, writer, previous_line_number, tokenized)
+        previous_line_number, terminating_character = tokenize_line(reader, writer, previous_line_number, tokenized)
 
         reader.next_char()
     tokenized.append(CR)
-    tokenized.append(0xFF)
+    tokenized.append(terminating_character)
 
     return tokenized
 

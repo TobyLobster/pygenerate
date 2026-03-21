@@ -329,11 +329,14 @@ def decode_basic(file_data: bytes, output_file_should_escape_chars: bool = True,
         i += 1
 
         if i == file_length:
-            listing.append("Bad Program (expected FF terminator).")
+            listing.append("Bad Program (expected top bit set terminator).")
             return listing, i, False
 
-        # Line number high byte. 0xFF marks end of program
-        if file_data[i] == END_OF_PROGRAM:
+        # Line number high byte. A top bit set character (usually 0xFF) marks end of program
+        if file_data[i] >= 128:
+            # If the file doesn't end in FF then output the character it does end with e.g. '\xcd'
+            if file_data[i] != 255:
+                listing.append(f"\\x{file_data[i]:02x}")
             i += 1
             return listing, i, True
 
@@ -399,7 +402,13 @@ def decode_basic(file_data: bytes, output_file_should_escape_chars: bool = True,
                 n1  = (n1 * 4) & 0xFF
                 high = n1 ^ n3
                 line_ref = high * 256 + low
-                decoded.extend(list(bytes(str(line_ref), encoding="ascii")))
+                
+                # If the line number is too big to be valid, we mark the detokenised 
+                # version to say it must be tokenized nonetheless.
+                if line_ref >= 0x8000:
+                    decoded.extend(list(bytes("\\{" + str(line_ref) + "}", encoding="ascii")))
+                else:
+                    decoded.extend(list(bytes(str(line_ref), encoding="ascii")))
             elif byte in TOKENS:
                 # We have found a token. The normal thing to do is to just output 
                 # the text of the token. This results in a text file that will get
@@ -529,7 +538,7 @@ def decode_basic(file_data: bytes, output_file_should_escape_chars: bool = True,
             decoded = bytes(f"{line_number:6d}", encoding='ascii') + bytes(decoded) + bytes("\n", encoding='ascii')
             listing.append(decoded)
 
-    listing.append("Bad program (file ends without FF terminator)")
+    listing.append("Bad program (file ends without the expected top bit set byte, usually FF)")
     return listing, i, False
 
 def decode_basic_file(filepath: str, output_file_should_escape_chars: bool) -> tuple[list, bool]:
