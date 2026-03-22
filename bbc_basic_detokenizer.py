@@ -266,6 +266,10 @@ def _is_digit(c: int) -> bool:
     """Return True if character is a digit."""
     return ord('0') <= c <= ord('9')
 
+def _is_alpha_digit(c: int) -> bool:
+    """Return True if character is alphanumeric or underscore."""
+    return (ord('_') <= c <= ord('z')) or (ord('A') <= c <= ord('Z')) or _is_digit(c)
+
 def ints_to_str(int_list: list[int]) -> str:
     """Convert a list of integers into a string with the ASCII encoding"""
     return ''.join(chr(i) for i in int_list)
@@ -450,20 +454,29 @@ def decode_basic(file_data: bytes, output_file_should_escape_chars: bool = True,
                 # typing lines of BASIC code at the BASIC command prompt, since 
                 # 'IF' would get tokenized as a keyword.
                 #
-                # So if we find the letters that happen match a keyword, we check 
+                # So if we find the letters that happen to match a keyword, we check 
                 # that we can round trip the detokenize and tokenize. If it doesn't 
                 # round trip correctly, then we mark it up as e.g. \{"IF"} to
                 # avoid any tokenization.
                 #
                 # We also check for abbreviations of keywords too, such as "RET." 
                 # which appears in e.g. Land of Chark (https://bbcmicro.co.uk/game.php?id=1657)
-                # We handle this, even though that looks to be erroneous BASIC code.
+                # We handle this, even though it is erroneous BASIC code.
 
                 # Check if there is the text of a keyword present here
                 match = next((s.decode("ascii") for s in TOKENS_REV if file_data[i:].startswith(s)), None)
                 if match:
-                    # Check the round trip works as expected when we record the token as a single byte
+                    # Check the round trip works as expected when we record the possible keyword as ASCII letters
                     word = list_of_ascii_bytes(match)
+                    
+                    # Extend 'word' to cover the whole word, because some keywords can appear at the start of a variable name
+                    # e.g. 'PIP' is a valid variable, even though it starts with the PI keyword. 
+                    # (These are the keywords with flag C set.)
+                    j = i+len(word)
+                    while j < line_end and _is_alpha_digit(file_data[j]):
+                        word.append(file_data[j])
+                        j += 1
+
                     if round_trip_works(decoded, word, word):
                         decoded.extend(word)
                         i += len(word)-1
