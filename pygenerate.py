@@ -1014,6 +1014,8 @@ BASIC files are stored as pure 7-bit ASCII text in `source` exactly as they woul
 | `\\x87`     | Inserts a non-printable byte (e.g. for MODE 7 graphics in a `PRINT` statement)                 |
 | `\\{IF}`    | Inserts the keyword token byte for `IF`, even where BASIC would not normally tokenize it       |
 | `\\{"IF"}`  | Inserts the ASCII values for `I` and `F`, even where BASIC would normally tokenize the keyword |
+| `\\{TIME-LHS}` | Inserts the left hand side token for a pseudo-variable (`PAGE`, `PTR`, `TIME`, `LOMEM`, `HIMEM`) |
+| `\\{TIME-RHS}` | Inserts the right hand side token for a pseudo-variable                                      |
 | `\\{54321}` | Tokenizes a line number even where BASIC would not normally do so                              |
 | `\\\\`       | Inserts a single backslash                                                                     |
 

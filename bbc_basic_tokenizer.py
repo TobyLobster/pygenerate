@@ -54,6 +54,11 @@ class KeywordFlags(IntFlag):
     P = 0x40
 
 
+# Plain int versions of the flags, for speed in the tokenizing loop
+_C, _M, _S, _F, _L, _R, _P = (int(f) for f in (KeywordFlags.C, KeywordFlags.M, KeywordFlags.S,
+                                               KeywordFlags.F, KeywordFlags.L, KeywordFlags.R, KeywordFlags.P))
+
+
 class TokenizeError(Exception):
     """Raised when BASIC tokenization fails.
 
@@ -86,7 +91,7 @@ class _Keyword:
     def __init__(self, name: str, token: int, flags: KeywordFlags):
         self.name = name
         self.token = token
-        self.flags = flags
+        self.flags = int(flags)
 
     def __repr__(self) -> str:
         return f"Keyword '{self.name}', token {self.token}, flags {self.flags}"
@@ -222,6 +227,12 @@ _keyword_list = [
     _Keyword("HIMEM",       0xD3, KeywordFlags.NONE),
 ]
 
+# Keywords grouped by first letter, keeping their order. Only keywords that start with
+# the current letter can match, so this gives the same result as scanning the whole list.
+_keywords_by_first_letter: dict[str, list[_Keyword]] = {}
+for _k in _keyword_list:
+    _keywords_by_first_letter.setdefault(_k.name[0], []).append(_k)
+
 def get_token_from_keyword_string(keyword: str) -> int | None:
     """Given a string, look it up as a keyword and return the token value, or None if not found."""
     
@@ -229,9 +240,9 @@ def get_token_from_keyword_string(keyword: str) -> int | None:
     for key in _keyword_list:
         if key.name == keyword:
             return key.token
-        if key.name + "-LHS" == keyword:
+        if (key.flags & _P) and key.name + "-LHS" == keyword:
             return key.token + 0x40
-        if key.name + "-RHS" == keyword:
+        if (key.flags & _P) and key.name + "-RHS" == keyword:
             return key.token
     return None
 
@@ -275,12 +286,14 @@ class Reader:
             \\x8f        (for binary values)
             \\{ELSE}     (which forces tokenization) or 
             \\{TIME-LHS} (which forces the left hand side token, for pseudo-variables)
+            \\{TIME-RHS} (which forces the right hand side token, for pseudo-variables)
             \\{"IF"}     (which forces no tokenization).
         
         The return value is a tuple of:
             * the character read
             * the 'dont_tokenize' boolean value (to signify it was a \\{"IF"} style markup found, so we force no tokenization) and 
-            * the 'is_marked_up_tokenised_keyword' boolean value (to signify it was a \\{IF} style markup found, so we forced tokenization)"""
+            * the 'is_marked_up_tokenised_keyword' value (True to signify it was a \\{IF} style markup found, so we forced tokenization,
+              or "exact" for \\{TIME-LHS} or \\{TIME-RHS} which force that exact token)"""
 
         # Cached chars are used for the \{"IF"} style of escaped expression.
         # The I and F are returned on each call along with the boolean value
@@ -350,7 +363,10 @@ class Reader:
                                         c = self._cached_chars.popleft()
                                         return(ord(c), True, False)
                                         
-                                    return (c, False, True)
+                                    # \{TIME-LHS} and \{TIME-RHS} name an exact token. A plain \{TIME}
+                                    # follows the usual left/right hand side rule for pseudo-variables.
+                                    is_exact = keyword_string.upper().endswith(("-LHS", "-RHS"))
+                                    return (c, False, "exact" if is_exact else True)
                                 keyword_string += c.decode("ascii")
                                 c = self.file.read(1)
 
@@ -488,18 +504,19 @@ def _tokenize_linenum(reader: Reader, writer: Writer) -> None:
     """Tokenize a line number reference (e.g., in GOTO/GOSUB).
 
     Line numbers are encoded as 3 bytes after the LINE_NUMBER_TOKEN.
-    Raises an error if the number was too large.
+    Returns True if tokenized, or False (after copying the number as ASCII)
+    if the number was too large.
     """
     buffer = bytearray(6)
     zero_count = 0
 
-    while reader.current_char() == '0':
+    while reader.current_char() == '0' and not reader.dont_tokenize:
         zero_count += 1
         reader.next_char()
 
     index = 0
     acc = 0
-    while _is_digit(reader.current_char()):
+    while _is_digit(reader.current_char()) and not reader.dont_tokenize:
         c = reader.current_char()
         acc = 10 * acc + (ord(c) - ord('0'))
         if acc >= 0x8000:
@@ -507,10 +524,12 @@ def _tokenize_linenum(reader: Reader, writer: Writer) -> None:
                 writer.write(ord('0'))
             for i in range(index):
                 writer.write(buffer[i])
-            _skip_write(_is_digit, reader, writer)
+            # As in the ROM, an overflowing number is skipped like any other number
+            # (digits and decimal points), and the caller then clears the flags.
+            _skip_write(_is_dot_digit, reader, writer)
             #raise TokenizeError(reader.line_number(), f"Found the line number {acc} which is too big (maximum allowed is 32767)")
             print(f"WARNING: On line {reader.line_number()} we found a reference to line number {acc} which is too big (maximum allowed is 32767)")
-            return
+            return False
 
         buffer[index] = ord(c)
         index += 1
@@ -519,7 +538,7 @@ def _tokenize_linenum(reader: Reader, writer: Writer) -> None:
     encoded_line_number = get_line_number_encoding(acc)
     for entry in encoded_line_number:
         writer.write(entry)
-    return
+    return True
 
 
 def _read_next_char(reader: Reader) -> str | None:
@@ -538,14 +557,17 @@ def _parse_keyword(reader: Reader, writer: Writer) -> _Keyword | None:
     match_name = None
     
     if reader.is_marked_up_tokenised_keyword:
+        marker = reader.is_marked_up_tokenised_keyword
         token = ord(reader.current_char())
         reader.next_char()
+        # The left hand side pseudo-variable tokens (e.g. TIME-LHS) are only in the keyword
+        # table to be found by token. Use the flags of the main entry for that keyword.
         for keyword in _keyword_list:
-            if keyword.token == token:
-                return (keyword, True)
+            if keyword.token == token or (keyword.flags & _P and keyword.token + 0x40 == token):
+                return (_Keyword(keyword.name, token, keyword.flags), marker)
         return (None, False)
 
-    for keyword in _keyword_list:
+    for keyword in _keywords_by_first_letter.get(reader.current_char(), ()):
         if not match_count or (match_count <= len(keyword.name) and match_name[:match_count] == keyword.name[:match_count]):
             while (match_count < len(keyword.name) and
                    reader.current_char() == keyword.name[match_count]):
@@ -555,7 +577,7 @@ def _parse_keyword(reader: Reader, writer: Writer) -> _Keyword | None:
             if match_count:
                 match_name = keyword.name
                 if match_count == len(keyword.name):
-                    if keyword.flags & KeywordFlags.C:
+                    if keyword.flags & _C:
                         if _is_alpha_digit(reader.current_char()):
                             # Keyword with flag C is not valid as it's followed by alphanumeric,
                             # we just write out the ASCII letters.
@@ -564,6 +586,13 @@ def _parse_keyword(reader: Reader, writer: Writer) -> _Keyword | None:
 
                 if reader.current_char() == '.':
                     reader.next_char()
+                    if (keyword.flags & _C) and _is_alpha_digit(reader.current_char()):
+                        # As in the ROM, the 'complete word only' rule also applies to an
+                        # abbreviation: e.g. "R.X" is not RETURN, so it is left as ASCII.
+                        for i in range(match_count):
+                            writer.write(ord(match_name[i]))
+                        writer.write(ord('.'))
+                        return (None, None)
                     return (keyword, False)
 
 
@@ -639,7 +668,11 @@ def tokenize_line_contents(reader: Reader, writer: Writer) -> None:
 
         if _is_dot_digit(c):
             if c != '.' and tokenize_numbers and not reader.dont_tokenize:
-                _tokenize_linenum(reader, writer)
+                if _tokenize_linenum(reader, writer):
+                    continue
+                # Line number overflowed: treat it as an ordinary number (as the ROM does)
+                start_of_line = False
+                tokenize_numbers = False
                 continue
             _skip_write(_is_dot_digit, reader, writer)
             start_of_line = False
@@ -663,31 +696,31 @@ def tokenize_line_contents(reader: Reader, writer: Writer) -> None:
         token = keyword.token
         flags = keyword.flags
 
-        if (flags & KeywordFlags.C) and _is_alpha_digit(reader.current_char()) and not is_marked_up_keyword:
+        if (flags & _C) and _is_alpha_digit(reader.current_char()) and not is_marked_up_keyword:
             start_of_line = False
             tokenize_numbers = False
             continue
 
-        if (flags & KeywordFlags.P) and start_of_line:
+        if (flags & _P) and start_of_line and is_marked_up_keyword != "exact" and token < 0xC0:
             token += 0x40
 
         writer.write(token)
 
-        if flags & KeywordFlags.M:
+        if flags & _M:
             start_of_line = False
             tokenize_numbers = False
 
-        if flags & KeywordFlags.S:
+        if flags & _S:
             start_of_line = True
             tokenize_numbers = False
 
-        if flags & KeywordFlags.F:
+        if flags & _F:
             _skip_write(_is_alpha_digit, reader, writer)
 
-        if flags & KeywordFlags.L:
+        if flags & _L:
             tokenize_numbers = True
 
-        if flags & KeywordFlags.R:
+        if flags & _R:
             _skip_write(_is_not_cr, reader, writer)
             return
 
@@ -779,6 +812,7 @@ def tokenize_file(file: BinaryIO, input_file_contains_escaped_chars: bool = True
     writer = Writer()
 
     tokenized: list[int] = []
+    terminating_character = 0xff    # default, used when the input is empty (the empty program is just CR, FF)
     while not reader.is_end():
         previous_line_number, terminating_character = tokenize_line(reader, writer, previous_line_number, tokenized)
 

@@ -20,7 +20,8 @@ TobyLobster
 """
 import sys
 import argparse
-from io import BytesIO
+from io import BytesIO, StringIO
+from contextlib import redirect_stdout
 import bbc_basic_tokenizer as bbt
 
 # BBC BASIC tokens mapping
@@ -242,6 +243,8 @@ TOKENS_REV = { t[0].encode("ascii"):t[1] for t in TOKENS_REV }
 
 # List of tokens for pseudo-variables (LHS versions): LOMEM, HIMEM, PAGE, PTR, TIME
 PSEUDO_VARIABLES_LHS = frozenset([207, 208, 209, 210, 211])
+# ... and the RHS versions
+PSEUDO_VARIABLES_RHS = frozenset([143, 144, 145, 146, 147])
 
 def escape(byte_value: int, escape_non_printable: bool) -> list:
     """If escapes are required, then change a backslash to a double backslash 
@@ -286,6 +289,43 @@ def list_of_ascii_bytes(s: str) -> list[bytes]:
     """Convert a string into a list of integers"""
     return list(bytes(s.encode("ascii")))
 
+# Characters that can change how the text just before them is tokenized: they can extend a
+# keyword (MOD+E is MODE, END+. is ENDPROC, GET+$ is GET$), stop a 'complete word only'
+# keyword (PI+P is the variable PIP), or extend a number (a line number followed by a digit).
+_LOOKAHEAD_CHARS = frozenset(b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_`abcdefghijklmnopqrstuvwxyz.$(")
+
+_tokenize_cache = [None, None]
+
+def _tokenize_contents(line: list) -> list:
+    """Tokenize the contents of a line (remembering the most recent result, since the
+    same line prefix is tokenized repeatedly while trying candidates)."""
+    key = bytes(line)
+    if _tokenize_cache[0] == key:
+        return _tokenize_cache[1]
+    reader = bbt.Reader(BytesIO(key), contains_escaped_characters=True)
+    writer = bbt.Writer()
+    bbt.tokenize_line_contents(reader, writer)
+    result = list(writer.data())
+    _tokenize_cache[0] = key
+    _tokenize_cache[1] = result
+    return result
+
+def _lookahead(file_data: bytes, i: int, line_end: int) -> list:
+    """The raw ASCII characters following index i that could affect how what comes before is tokenized."""
+    result = []
+    while i < line_end and file_data[i] in _LOOKAHEAD_CHARS and len(result) < 16:
+        result.append(file_data[i])
+        i += 1
+    return result
+
+def candidate_works(line: list, candidate: list, expected: list, lookahead: list) -> bool:
+    """Does appending 'candidate' to 'line' tokenize to exactly 'expected', given that the
+    characters in 'lookahead' will follow? Earlier output must also be unchanged."""
+    before = _tokenize_contents(line)
+    after = _tokenize_contents(line + candidate + lookahead)
+    n = len(before)
+    return after[:n] == before and after[n:n + len(expected)] == expected
+
 def round_trip_works(line: list, new_bit: list, expected_ending: list, next_char: str = None):
     """'line' extended with 'new_bit' is an ASCII string supplied as a list 
     of integer values. It represents the BASIC line we are tokenizing. We 
@@ -305,6 +345,24 @@ def round_trip_works(line: list, new_bit: list, expected_ending: list, next_char
                         return False
         return True
     return False
+
+def verify_round_trip(listing: list, original: bytes) -> str | None:
+    """Tokenize the detokenized 'listing' and compare with the 'original' bytes.
+    Returns None if identical, otherwise an error message."""
+    text = "".join(listing)
+    try:
+        with redirect_stdout(StringIO()):    # silence tokenizer warnings
+            tokenized = bytes(bbt.tokenize_file(BytesIO(text.encode("latin-1")), True))
+    except bbt.TokenizeError as e:
+        return f"ERROR: Detokenized text does not tokenize: {e}"
+    except Exception as e:
+        # Never let the check itself crash the caller: report it as a failed decode
+        return f"ERROR: Tokenizing the detokenized text failed: {e!r}"
+    if tokenized == bytes(original):
+        return None
+    k = next((k for k in range(min(len(tokenized), len(original))) if tokenized[k] != original[k]),
+             min(len(tokenized), len(original)))
+    return f"ERROR: Detokenized text does not round trip to the original bytes (first difference at offset {hex(k)})"
 
 def decode_basic(file_data: bytes, output_file_should_escape_chars: bool = True, start_index: int = 0) -> tuple[list, int, bool]:
     """
@@ -342,6 +400,13 @@ def decode_basic(file_data: bytes, output_file_should_escape_chars: bool = True,
             if file_data[i] != 255:
                 listing.append(f"\\x{file_data[i]:02x}")
             i += 1
+
+            # Finally, check the whole listing tokenizes back to the original bytes
+            if output_file_should_escape_chars:
+                error = verify_round_trip(listing, file_data[start_index:i])
+                if error:
+                    listing.append(error)
+                    return listing, i, False
             return listing, i, True
 
         if i > (file_length - 3):
@@ -394,25 +459,43 @@ def decode_basic(file_data: bytes, output_file_should_escape_chars: bool = True,
             elif byte == ENCODED_LINE_NUMBER:
                 # Encoded line number token
                 # Decode using algorithm from "The BASIC ROM User Guide" page 41
-                if (i + 3) >= line_end:
-                    break
-                n1 = file_data[i + 1]
-                n2 = file_data[i + 2]
-                n3 = file_data[i + 3]
-                i += 3
+                original = list(file_data[i:i + 4])
+                line_ref = None
+                if (i + 3) < line_end:
+                    n1 = file_data[i + 1]
+                    n2 = file_data[i + 2]
+                    n3 = file_data[i + 3]
 
-                n1  = (n1 * 4) & 0xFF
-                low = (n1 & 0xC0) ^ n2
-                n1  = (n1 * 4) & 0xFF
-                high = n1 ^ n3
-                line_ref = high * 256 + low
-                
-                # If the line number is too big to be valid, we mark the detokenised 
-                # version to say it must be tokenized nonetheless.
-                if line_ref >= 0x8000:
-                    decoded.extend(list(bytes("\\{" + str(line_ref) + "}", encoding="ascii")))
+                    n1  = (n1 * 4) & 0xFF
+                    low = (n1 & 0xC0) ^ n2
+                    n1  = (n1 * 4) & 0xFF
+                    high = n1 ^ n3
+                    line_ref = high * 256 + low
+
+                    # Only an encoding that the tokenizer would produce can be written as a number
+                    if bbt.get_line_number_encoding(line_ref) != original:
+                        line_ref = None
+
+                if line_ref is None:
+                    # Truncated or non-standard encoding: preserve the bytes exactly.
+                    # (\xHH escaped bytes are never tokenized.)
+                    for b in file_data[i:min(i + 4, line_end)]:
+                        decoded.extend(list_of_ascii_bytes(f"\\x{b:02x}"))
+                    i = min(i + 4, line_end)
+                    start_of_line = False
+                    continue
+
+                # Write the plain number if it tokenizes back to the same bytes in this
+                # context (e.g. after GOTO). Otherwise (e.g. after a variable name, after
+                # another digit, or a line number too big to be valid) we mark it up as
+                # \{1234} to say it must be tokenized nonetheless.
+                lookahead = _lookahead(file_data, i + 4, line_end)
+                plain = list_of_ascii_bytes(str(line_ref))
+                if (not start_of_line) and line_ref < 0x8000 and candidate_works(decoded, plain, original, lookahead):
+                    decoded.extend(plain)
                 else:
-                    decoded.extend(list(bytes(str(line_ref), encoding="ascii")))
+                    decoded.extend(list_of_ascii_bytes("\\{" + str(line_ref) + "}"))
+                i += 3
             elif byte in TOKENS:
                 # We have found a token. The normal thing to do is to just output 
                 # the text of the token. This results in a text file that will get
@@ -431,17 +514,20 @@ def decode_basic(file_data: bytes, output_file_should_escape_chars: bool = True,
                 # keyword even if the regular tokenizer wouldn't. For 
                 # pseudo-variables we can force the LHS token with \{PAGE-LHS} if 
                 # needed.
-                token_string = list_of_ascii_bytes(TOKENS[byte])
-                token_string_marked_up = list_of_ascii_bytes('\\{' + TOKENS[byte] + '}')
-                token_string_marked_up_lhs = list_of_ascii_bytes('\\{' + TOKENS[byte] + '-LHS}')
-                
-                next_char = chr(file_data[i+1]) if (i+1) < line_end else None
-                if round_trip_works(decoded, token_string, [byte], next_char):
-                    decoded.extend(token_string)
-                elif round_trip_works(decoded, token_string_marked_up, [byte]):
-                    decoded.extend(token_string_marked_up)
-                elif (byte in PSEUDO_VARIABLES_LHS) and round_trip_works(decoded, token_string_marked_up_lhs, [byte]):
-                    decoded.extend(token_string_marked_up_lhs)
+                candidates = [TOKENS[byte], '\\{' + TOKENS[byte] + '}']
+                if byte in PSEUDO_VARIABLES_LHS:
+                    candidates.append('\\{' + TOKENS[byte] + '-LHS}')
+                elif byte in PSEUDO_VARIABLES_RHS:
+                    candidates.append('\\{' + TOKENS[byte] + '-RHS}')
+
+                # The characters that follow can change what the keyword text tokenizes to
+                # (e.g. MOD followed by E would be MODE), so check with them in place.
+                lookahead = _lookahead(file_data, i + 1, line_end)
+                for candidate in candidates:
+                    candidate = list_of_ascii_bytes(candidate)
+                    if candidate_works(decoded, candidate, [byte], lookahead):
+                        decoded.extend(candidate)
+                        break
                 else:
                     # Error out
                     listing.append(f"ERROR: Could not detokenize {byte} and get a valid round trip, at file offset {hex(i)}")
@@ -464,7 +550,7 @@ def decode_basic(file_data: bytes, output_file_should_escape_chars: bool = True,
                 # We handle this, even though it is erroneous BASIC code.
 
                 # Check if there is the text of a keyword present here
-                match = next((s.decode("ascii") for s in TOKENS_REV if file_data[i:].startswith(s)), None)
+                match = next((s.decode("ascii") for s in TOKENS_REV if file_data.startswith(s, i, line_end)), None)
                 if match:
                     # Check the round trip works as expected when we record the possible keyword as ASCII letters
                     word = list_of_ascii_bytes(match)
@@ -477,14 +563,14 @@ def decode_basic(file_data: bytes, output_file_should_escape_chars: bool = True,
                         word.append(file_data[j])
                         j += 1
 
-                    if round_trip_works(decoded, word, word):
+                    if candidate_works(decoded, word, word, _lookahead(file_data, i + len(word), line_end)):
                         decoded.extend(word)
                         i += len(word)-1
                     else:
                         # If no round trip to the byte we want, then mark it explicitly 
                         # as the string of letters, e.g. \{"IF"}
                         token_string_quoted_marked_up = list_of_ascii_bytes('\\{"' + match + '"}')
-                        if round_trip_works(decoded, token_string_quoted_marked_up, list_of_ascii_bytes(match)):
+                        if candidate_works(decoded, token_string_quoted_marked_up, list_of_ascii_bytes(match), _lookahead(file_data, i + len(match), line_end)):
                             decoded.extend(token_string_quoted_marked_up)
                             i += len(match)-1
                         else:
@@ -516,19 +602,22 @@ def decode_basic(file_data: bytes, output_file_should_escape_chars: bool = True,
                         # First, find the full range of all the digits
                         word = chr(file_data[i])
                         j = i+1
-                        while (j < file_length) and _is_digit(file_data[j]):
+                        while (j < line_end) and _is_digit(file_data[j]):
                             word += chr(file_data[j])
                             j+=1
 
                         # Check if retokenizing results in the same ASCII digits we expect. 
                         # If it doesn't, then the number was erroneously tokenised. 
                         # We mark up the number as explicit ASCII characters instead.
-                        if not round_trip_works(decoded, list_of_ascii_bytes(word), list_of_ascii_bytes(word)):
+                        if not candidate_works(decoded, list_of_ascii_bytes(word), list_of_ascii_bytes(word), _lookahead(file_data, i + len(word), line_end)):
                             decoded.extend(list_of_ascii_bytes('\\{"' + word + '"}'))
                             i += len(word)-1
                         else:
-                            # Output a regular character.
-                            decoded.extend(escape(byte, output_file_should_escape_chars))
+                            # Output the whole number as regular characters (it was
+                            # checked as a whole, e.g. 'GOTO52030' is too big to be a
+                            # line number, so stays as ASCII digits).
+                            decoded.extend(list_of_ascii_bytes(word))
+                            i += len(word)-1
                     else:
                         # Output a regular character.
                         decoded.extend(escape(byte, output_file_should_escape_chars))
