@@ -21,9 +21,12 @@ import shutil
 import subprocess
 import sys
 import re
+import math
+from enum import Enum
 from typing import TYPE_CHECKING
 
 import bbc_basic_detokenizer
+import bbc_basic_syntax
 import dfsimage
 
 if TYPE_CHECKING:
@@ -100,10 +103,10 @@ class BBCMicroFile:
         self.source_filepath: str | None = None
         self.source_files = []
 
-    def has_valid_exec(self, basic_memory_ranges = []):
+    def has_valid_exec(self, basic_details_list = []):
         # Check the execution address is not within the range of BASIC code
-        for r in basic_memory_ranges:
-            if (self.exec_address >= r[0]) and (self.exec_address < (r[0] + r[1])):
+        for basic_details in basic_details_list:
+            if (self.exec_address >= (self.load_address + basic_details.start)) and (self.exec_address < (self.load_address + basic_details.start + basic_details.length)):
                 return False
         # Check the exec address is non-zero and within the range of the load address and length
         return (self.load_address & 0xffff != 0) and (self.exec_address & 0xffff != 0) and (self.exec_address & 0xffff >= self.load_address & 0xffff) and (self.exec_address & 0xffff < ((self.load_address & 0xffff) + self.length))
@@ -433,7 +436,7 @@ def rationalize_load_address(bbc_file):
 
     return (load_address, big_file)
 
-def handle_code(content, bbc_file, source_directory, control_directory, asm_file, basic_memory_ranges):
+def handle_code(content, bbc_file, source_directory, control_directory, asm_file, basic_details_list):
     control_filepath = os.path.join(control_directory, os.path.basename(bbc_file.host_filepath) + ".py")
     host_filepath_relative_to_script = os.path.relpath(bbc_file.host_filepath, control_directory)
 
@@ -458,15 +461,7 @@ acorn.bbc()
     load_address, big_file = rationalize_load_address(bbc_file)
 
     if big_file:
-        # copy from bbc_file to text form (hex bytes) in source/<file>_hex.txt
-        hex_text_basename = f"{os.path.basename(bbc_file.host_filepath)}_hex.txt"
-        hex_text_filepath = os.path.join(source_directory, hex_text_basename)
-        bin_to_hextext(bbc_file.host_filepath, hex_text_filepath)
-
-        # Make the binary file from the hex text form: 'source/<file>_hex.txt' to 'build/disk/<file>'
-        build_script = f"destination_filepath = script_dir / 'build' / 'disc' / {repr(os.path.basename(bbc_file.host_filepath))}\n"
-        build_script = f'hextext_to_bin({repr("source/" + hex_text_basename)}, destination_filepath)\n'
-        return (build_script, True)
+        return None
 
     control_script += f"load(0x{load_address:04x}, {repr('original/' + os.path.basename(bbc_file.host_filepath))}, '6502')\n"
     if load_address == SIDEWAYS_ROM_ADDRESS:
@@ -476,11 +471,10 @@ acorn.bbc()
                 if content[copyright_offset:copyright_offset+4] == bytes([0, ord('('), ord('C'), ord(')')]):
                     control_script += 'acorn.is_sideways_rom()\n'
 
-    # TODO: Really only one range is supported atm
-    for r in basic_memory_ranges:
-        control_script += f'include_binary_file(0x{r[0] & 0xffff:04x}, {repr("build/" + os.path.basename(bbc_file.host_filepath) + "_basic")})\n'
+    for basic_details in basic_details_list:
+        control_script += f'include_binary_file(0x{(load_address + basic_details.start) & 0xffff:04x}, {repr(os.path.join("build", basic_details.build_filename))})\n'
 
-    if bbc_file.has_valid_exec(basic_memory_ranges):
+    if bbc_file.has_valid_exec(basic_details_list):
         control_script += f"entry(0x{bbc_file.exec_address & 0xffff:04x}, 'entry_point')\n"
     control_script += "\ngo()\n"
 
@@ -493,7 +487,7 @@ acorn.bbc()
 
     # Assemble asm into new binaries
     build_script += f'assemble({repr(asm_file)}, {repr(os.path.basename(bbc_file.host_filepath))})\n'
-    return (build_script, False)
+    return build_script
 
 def parse_arguments(args: Sequence[str]) -> None:
     if len(args) == 0:
@@ -517,6 +511,65 @@ def parse_arguments(args: Sequence[str]) -> None:
         else:
             config.loose_folder = make_absolute_filepath(args[i])
             config.destination_folder, config.extension = os.path.splitext(os.path.basename(config.loose_folder))
+
+class BasicDetails:
+    def __init__(self, start, length, listing):
+        self.start = start
+        self.length = length
+        self.listing = listing
+
+class LValue(Enum):
+    INVALID = -1
+    BYTE = 0
+    INT  = 1
+    FLOAT = 4
+    MEMORY_STRING = 0x80
+    STRING_VARIABLE = 0x81
+
+def listing_has_good_basic_syntax(content, at_start_of_file=False):
+    """Is the tokenised program structure at the start of 'content' likely to be BASIC?
+
+    Uses bbc_basic_syntax.assess_program, which weighs up valid BASIC and inline assembler lines
+    (a fragment part way through a file may start inside an assembler block), gives partial
+    credit to corrupted lines, and takes increasing line numbers as evidence. Its thresholds are
+    calibrated on the pygenerate test discs.
+    """
+    result = bbc_basic_syntax.assess_program(content, 0, at_start_of_file)
+    if not result.structure_ok:
+        return False
+    if not result.lines:
+        # The empty program '0x0d <top bit set>' is handled by the caller.
+        return True
+    return result.likely
+
+def find_basic_details(content):
+    index = 0
+    length = len(content)
+    basic_details_list = []
+    while index < length:
+        while index < length and content[index] != 13:
+            index += 1
+        if index < length:
+            listing, basic_length, success = bbc_basic_detokenizer.decode_basic(content[index:])
+            if success:
+                good_syntax = listing_has_good_basic_syntax(content[index:], index == 0)
+                if not good_syntax:
+                    index += 1
+                    continue
+
+                # For BASIC fragments not at the start of the file we enforce a stricter filter to avoid false positives
+                if (index > 0) and (len(listing) < 4):
+                    index += basic_length
+                    continue
+
+                # Don't count the null BASIC program '0x0d <top bit set>'
+                if basic_length > 2:
+                    listing = "".join(listing)
+                    basic_details_list.append(BasicDetails(index, basic_length, listing))
+                index += basic_length
+            else:
+                index += 1
+    return basic_details_list
 
 def main(args: Sequence[str]) -> None:
     """Main entry point for pygenerate.
@@ -594,7 +647,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from tools import bbc_basic_tokenizer  # For tokenising BASIC programs
+from tools import bbc_basic_tokenizer  # For tokenizing BASIC programs
 from tools import dfsimage             # For writing BBC disk images
 
 
@@ -634,7 +687,7 @@ def run_subprocess(args: list[str], error_message: str, cwd: Path | None = None)
     s = p.stderr.decode().strip()
     if s:
         print(s)
-    
+
     if p.returncode != 0:
         print(args)
         print(p.stderr.decode().strip())
@@ -763,110 +816,145 @@ def add_file(
 
             print(f'Processing file {_escape_non_printable(bbc_file.bbc_filepath)}', end='')
 
-            # Check if it's BASIC (and not just the null BASIC program encoded as '0D FF'):
-            listing, end_index, success = bbc_basic_detokenizer.decode_basic(content)
-            if success and end_index > 2:
-                # BASIC program found
-                file_types_present.add("BASIC")
-                basic_txt = "".join(listing)
+            # Check for a bad load address, one that goes beyond the end of memory. Make up a low load address if so.
+            # If it's still too big, then we treat it separately
+            load_address, big_file = rationalize_load_address(bbc_file)
 
-                # Write the BASIC text out to source folder
-                bbc_file.source_filepath = os.path.join(source_directory, os.path.basename(bbc_file.host_filepath) + "_basic.txt")
-                with open(bbc_file.source_filepath, "w") as fh:
-                    fh.write(basic_txt)
+            if big_file and not is_totally_printable(content):
+                file_types_present.add("BigHex")
+                bbc_file.description += "large binary file"
+                print(f" as hex")
 
-                # Add to list of source filenames
-                bbc_file.source_files.append(os.path.basename(bbc_file.source_filepath))
+                # copy from bbc_file to text form (hex bytes) in source/<file>_hex.txt
+                hex_text_basename = f"{os.path.basename(bbc_file.host_filepath)}_hex.txt"
+                hex_text_filepath = os.path.join(source_directory, hex_text_basename)
+                bbc_file.source_files.append(os.path.basename(hex_text_filepath))
+                bin_to_hextext(bbc_file.host_filepath, hex_text_filepath)
 
-                needs_assembly = end_index < bbc_file.length
-                if needs_assembly:
-                    #if (bbc_file.exec_address & 0xffff >= bbc_file.load_address & 0xffff + end_index) and (bbc_file.exec_address & 0xffff < (bbc_file.load_address & 0xffff + bbc_file.length)):
-                    #    bbc_file.description += f"BASIC + {len(content) - end_index} bytes of code/data afterwards"
-                    #else:
-                    bbc_file.description += f"BASIC + {len(content) - end_index:,} bytes of code/data afterwards"
-                else:
-                    bbc_file.description += "BASIC"
-                print(f" as {bbc_file.description}")
-
-                # We only support one BASIC snippet per file currently
-
-                # Check for a bad load address, one that goes beyond the end of memory. Make up a low load address if so.
-                # If it's still too big, then we treat it separately
-                load_address, big_file = rationalize_load_address(bbc_file)
-                basic_snippet = [(load_address, end_index)]
-
-                # Convert to BASIC II format on disc
-                build_script += f'\n# Create BASIC file {bbc_file.bbc_filepath}\n'
-                build_script += f"source_filepath = script_dir / 'source' / {repr(os.path.basename(bbc_file.source_filepath))}\n"
+                # Make the binary file from the hex text form: 'source/<file>_hex.txt' to 'build/disk/<file>'
+                build_script += f"\n# Create binary file {bbc_file.bbc_filepath} (from hex)\n"
                 build_script += f"destination_filepath = script_dir / 'build' / 'disc' / {repr(os.path.basename(bbc_file.host_filepath))}\n"
-                if needs_assembly:
-                    file_types_present.add("BASIC+Asm")
-                    build_script += f"tokenized_basic = script_dir / 'build' / {repr(os.path.basename(bbc_file.host_filepath) + '_basic')}\n"
-                    build_script += f'tokenize_basic(source_filepath, tokenized_basic)\n'
+                build_script += f'hextext_to_bin({repr("source/" + hex_text_basename)}, destination_filepath)\n'
+
+                # Create INF for destination file
+                build_script += f"make_inf(destination_filepath, {repr(bbc_file.bbc_filepath)}, 0x{bbc_file.load_address:06x}, 0x{bbc_file.exec_address:06x}, '{'L' if bbc_file.locked else ''}')\n"
+            else:
+                # Find the places in this binary file where valid BASIC programs live.
+                # Normally a BASIC program lives at the start of the file (and is often the entire file), but not always. They can be hiding in the middle somewhere.
+                basic_details_list = find_basic_details(content)
+
+                if basic_details_list:
+                    file_types_present.add("BASIC")
+
+                    # Output each BASIC file (as *_part1_basic.txt etc if there are multiple parts)
+                    part_number = 1
+                    for basic_details in basic_details_list:
+                        # Calculate filename for the BASIC text file
+                        basic_filename = os.path.basename(bbc_file.host_filepath)
+                        if len(basic_details_list) > 1:
+                            basic_filename += f"_part_{part_number}"
+                            part_number += 1
+                        basic_filename += "_basic.txt"
+                        basic_details.source_filepath = os.path.join(source_directory, basic_filename)
+                        bbc_file.source_files.append(os.path.basename(basic_details.source_filepath))
+
+                        # Write the BASIC text out to the source folder
+                        with open(basic_details.source_filepath, "w") as fh:
+                            fh.write(basic_details.listing)
+
+                    # Output one asm file that combines the BASIC files with any asm between.
+                    # But no need for asm if the file is all just one BASIC program.
+                    needs_assembly = (basic_details_list[0].start > 0) or (basic_details_list[0].length < bbc_file.length)
+                    if needs_assembly:
+                        file_types_present.add("BASIC+Asm")
+
+                        # Calculate description
+                        index = 0
+                        desc_list = []
+                        for basic_details in basic_details_list:
+                            if index < basic_details.start:
+                                desc_list.append(f"{basic_details.start - index} bytes of code/data")
+                                index = basic_details.start + basic_details.length
+                            desc_list.append("BASIC")
+                        if index < bbc_file.length:
+                            desc_list.append(f"{bbc_file.length - index} bytes of code/data")
+                        bbc_file.description += " + ".join(desc_list)
+                        print(f" as {bbc_file.description}")
+
+                        # Write each of the BASIC programs out to tokenized form in the build directory
+                        build_script += f'\n# Create binary (BASIC+Asm) file {bbc_file.bbc_filepath}\n'
+                        for basic_details in basic_details_list:
+                            basic_details.build_filename = os.path.basename(os.path.splitext(basic_details.source_filepath)[0])
+                            build_script += f"source_filepath = script_dir / 'source' / {repr(os.path.basename(basic_details.source_filepath))}\n"
+                            build_script += f"tokenized_basic = script_dir / 'build' / {repr(basic_details.build_filename)}\n"
+                            build_script += f'tokenize_basic(source_filepath, tokenized_basic)\n'
+
+                        # Write build script for the asm file
+                        asm_file = f"{os.path.basename(bbc_file.host_filepath)}_{config.assembler}.asm"
+                        build_script_result = handle_code(content, bbc_file, source_directory, control_directory, asm_file, basic_details_list)
+
+                        bbc_file.source_files.append(os.path.basename(asm_file))
+
+                        build_script += f"destination_filepath = script_dir / 'build' / 'disc' / {repr(os.path.basename(bbc_file.host_filepath))}\n"
+                        build_script += build_script_result
+
+                        # Create INF for destination file
+                        build_script += f"make_inf(destination_filepath, {repr(bbc_file.bbc_filepath)}, 0x{bbc_file.load_address:06x}, 0x{bbc_file.exec_address:06x}, '{'L' if bbc_file.locked else ''}')\n"
+                    else:
+                        print(f" as BASIC")
+                        # Just one BASIC program
+                        # Add to the build_script to tokenize this BASIC program
+                        build_script += f'\n# Create BASIC file {bbc_file.bbc_filepath}\n'
+                        build_script += f"source_filepath = script_dir / 'source' / {repr(os.path.basename(basic_details_list[0].source_filepath))}\n"
+                        build_script += f"destination_filepath = script_dir / 'build' / 'disc' / {repr(os.path.basename(bbc_file.host_filepath))}\n"
+                        build_script += f'tokenize_basic(source_filepath, destination_filepath)\n'
+
+                        # Create INF for destination file
+                        build_script += f"make_inf(destination_filepath, {repr(bbc_file.bbc_filepath)}, 0x{bbc_file.load_address:06x}, 0x{bbc_file.exec_address:06x}, '{'L' if bbc_file.locked else ''}')\n"
+                elif is_totally_printable(content):
+                    # We have a text file
+                    bbc_file.description += "text"
+                    print(f" as {bbc_file.description}")
+                    file_types_present.add("Text")
+
+                    # Write the current file content into a file in source_directory, with carriage returns converted to the host OS line ending
+                    source_filepath = os.path.join(source_directory, os.path.basename(bbc_file.host_filepath) + ".txt")
+                    with open(source_filepath, "wb") as fh:
+                        fh.write(content.replace(b'\x0d', os.linesep.encode()))
+
+                    # add it to list of source filenames
+                    bbc_file.source_files.append(os.path.basename(source_filepath))
+
+                    # Write to the build script
+                    build_script += f'\n# Create text file {bbc_file.bbc_filepath}\n'
+                    build_script += f"destination_filepath = script_dir / 'build' / 'disc' / {repr(os.path.basename(bbc_file.host_filepath))}\n"
+                    build_script += f"copy_text_to_bbc(script_dir / 'source' / {repr(os.path.basename(source_filepath))}, destination_filepath)\n"
+                    build_script += f"make_inf(destination_filepath, {repr(bbc_file.bbc_filepath)}, 0x{bbc_file.load_address:06x}, 0x{bbc_file.exec_address:06x}, '{'L' if bbc_file.locked else ''}')\n"
+                else:
+                    # We have code and/or data
+
+                    # Get description
+                    if bbc_file.has_valid_exec():
+                        bbc_file.description += "code/data"
+                    else:
+                        bbc_file.description += "binary data"
+                    print(f" as {bbc_file.description}")
+
+                    file_types_present.add("ASM")
+
+                    # Add to build script
+                    build_script += f'\n# Create binary {bbc_file.bbc_filepath}\n'
 
                     asm_file = f"{os.path.basename(bbc_file.host_filepath)}_{config.assembler}.asm"
-                    build_script_result, big_file = handle_code(content, bbc_file, source_directory, control_directory, asm_file, basic_snippet)
+                    build_script_result = handle_code(content, bbc_file, source_directory, control_directory, asm_file, [])
 
-                    if big_file:
-                        build_script += f'\n# Create hex file {bbc_file.bbc_filepath}\n'
-                        hex_text_basename = f"{os.path.basename(bbc_file.host_filepath)}_hex.txt"
-                        bbc_file.source_files.append(os.path.basename(hex_text_basename))
-                    else:
-                        build_script += f'\n# Create disassembly {bbc_file.bbc_filepath}\n'
-                        bbc_file.source_files.append(os.path.basename(asm_file))
-                    build_script += build_script_result
-                else:
-                    build_script += f'tokenize_basic(source_filepath, destination_filepath)\n'
-
-
-                # Create INF for destination file
-                build_script += f"make_inf(destination_filepath, {repr(bbc_file.bbc_filepath)}, 0x{bbc_file.load_address:06x}, 0x{bbc_file.exec_address:06x}, '{'L' if bbc_file.locked else ''}')\n"
-
-            elif is_totally_printable(content):
-                bbc_file.description += "text"
-                print(f" as {bbc_file.description}")
-                file_types_present.add("Text")
-
-                # Write the current file content into a file in source_directory, with carriage returns converted to the host OS line ending
-                bbc_file.source_filepath = os.path.join(source_directory, os.path.basename(bbc_file.host_filepath) + ".txt")
-                with open(bbc_file.source_filepath, "wb") as fh:
-                    fh.write(content.replace(b'\x0d', os.linesep.encode()))
-
-                # add to list of source filenames
-                bbc_file.source_files.append(os.path.basename(bbc_file.source_filepath))
-
-                build_script += f'\n# Create text file {bbc_file.bbc_filepath}\n'
-                build_script += f"destination_filepath = script_dir / 'build' / 'disc' / {repr(os.path.basename(bbc_file.host_filepath))}\n"
-                build_script += f"copy_text_to_bbc(script_dir / 'source' / {repr(os.path.basename(bbc_file.source_filepath))}, destination_filepath)\n"
-                build_script += f"make_inf(destination_filepath, {repr(bbc_file.bbc_filepath)}, 0x{bbc_file.load_address:06x}, 0x{bbc_file.exec_address:06x}, '{'L' if bbc_file.locked else ''}')\n"
-
-            else:
-                if bbc_file.has_valid_exec():
-                    bbc_file.description += "code/data"
-                else:
-                    bbc_file.description += "binary data"
-                print(f" as {bbc_file.description}")
-
-                # Disassemble
-                # Add to python control script that will invoke py8dis to disassemble the file
-
-                asm_file = f"{os.path.basename(bbc_file.host_filepath)}_{config.assembler}.asm"
-                build_script_result, big_file = handle_code(content, bbc_file, source_directory, control_directory, asm_file, [])
-
-                if big_file:
-                    build_script += f'\n# Create hex file {bbc_file.bbc_filepath}\n'
-                    file_types_present.add("BigHex")
-                    hex_text_basename = f"{os.path.basename(bbc_file.host_filepath)}_hex.txt"
-                    bbc_file.source_files.append(os.path.basename(hex_text_basename))
-                else:
-                    build_script += f'\n# Create binary {bbc_file.bbc_filepath}\n'
-                    file_types_present.add("ASM")
                     bbc_file.source_files.append(os.path.basename(asm_file))
-                build_script += f"destination_filepath = script_dir / 'build' / 'disc' / {repr(os.path.basename(bbc_file.host_filepath))}\n"
-                build_script += build_script_result
 
-                # Create INF for destination file
-                build_script += f"make_inf(destination_filepath, {repr(bbc_file.bbc_filepath)}, 0x{bbc_file.load_address:06x}, 0x{bbc_file.exec_address:06x}, '{'L' if bbc_file.locked else ''}')\n"
+                    build_script += f"destination_filepath = script_dir / 'build' / 'disc' / {repr(os.path.basename(bbc_file.host_filepath))}\n"
+                    build_script += build_script_result
+
+                    # Create INF for destination file
+                    build_script += f"make_inf(destination_filepath, {repr(bbc_file.bbc_filepath)}, 0x{bbc_file.load_address:06x}, 0x{bbc_file.exec_address:06x}, '{'L' if bbc_file.locked else ''}')\n"
 
     # Create disc image
     build_script += f'\n# Create {config.extension}\n'
@@ -898,7 +986,7 @@ def add_file(
     # Create tools/__init__.py
     with open(os.path.join(tools_directory, "__init__.py"), "w") as fh:
         fh.write("# __init__.py")
-    
+
     # Write the build script
     with open(os.path.join(config.destination_folder, "build.py"), "w") as fh:
         fh.write(build_script)
@@ -910,9 +998,9 @@ def add_file(
     if 'ASM' in file_types_present or 'BASIC+Asm' in file_types_present:
         readme_content_full += """
 #### ASM
-The `.asm` files in `source` are overwritten during the build: the binary files from `original` are disassembled to produce them. 
+The `.asm` files in `source` are overwritten during the build: the binary files from `original` are disassembled to produce them.
 
-The scripts in `control` are intended to be updated iteratively — adding label names and commentary as `py8dis` repeatedly disassembles the binary making the code progressively easier to understand. 
+The scripts in `control` are intended to be updated iteratively — adding label names and commentary as `py8dis` repeatedly disassembles the binary making the code progressively easier to understand.
 
 Once the source is sufficiently annotated, the `disassemble()` calls in `build.py` can be removed (as can the `control` and `original` folders) at which point the `.asm` files become regular source files that can be edited freely.
 """
@@ -933,7 +1021,7 @@ If the file ends with a line `\\xCC` this denotes the terminator byte. The defau
 """
     if 'BASIC+Asm' in file_types_present:
         readme_content_full += """
-BASIC files with trailing binary content are combined during the build by first tokenising the BASIC code, then prepending it to the binary data at the start of the `.asm` file.
+BASIC files with trailing binary content are combined during the build by first tokenizing the BASIC code, then prepending it to the binary data at the start of the `.asm` file.
 """
 
     if 'Text' in file_types_present:
@@ -941,13 +1029,13 @@ BASIC files with trailing binary content are combined during the build by first 
 #### Text
 Text files in `source` use native OS line endings, which are converted to BBC Micro carriage returns (ASCII 13) during the build.
 """
-   
+
     if 'BigHex' in file_types_present:
         readme_content_full += """
 #### Large binary files
 Binary files larger than 64 KB are stored as ASCII hex and converted to binary at build time, since most assemblers cannot handle files above this threshold.
-""" 
-    
+"""
+
     file_details = ""
     if files_to_process:
         rows = []
@@ -959,23 +1047,25 @@ Binary files larger than 64 KB are stored as ASCII hex and converted to binary a
                 bbc_file.description,
                 "<BR>".join(italic_source_files),
             ))
-    
+
+        # Stats
         headers = ("File", "Description", "Source File")
         col_widths = [
             max(len(headers[i]), max(len(row[i]) for row in rows))
             for i in range(len(headers))
         ]
-    
+
         def fmt_row(cells):
             return "| " + " | ".join(c.ljust(w) for c, w in zip(cells, col_widths)) + " |\n"
-    
+
         def fmt_sep():
             return "| " + " | ".join(":" + "-" * (w - 1) for w in col_widths) + " |\n"
-    
+
         file_details += fmt_row(headers)
         file_details += fmt_sep()
         for row in rows:
             file_details += fmt_row(row)
+
     # Replace parts in the README
     assembler_url = None
     if config.assembler == "beebasm":
@@ -993,10 +1083,11 @@ Binary files larger than 64 KB are stored as ASCII hex and converted to binary a
     readme_content_full = readme_content_full.replace("<TITLE>", ssd_title)
     readme_content_full = readme_content_full.replace("<FILE_DETAILS>", file_details)
     readme_content_full = readme_content_full.replace("<SSD_FILENAME>", ssd_filename)
-    
+
     # Write the README.md
     with open(os.path.join(config.destination_folder, "README.md"), "w") as fh:
         fh.write(readme_content_full)
+
 
 if __name__ == "__main__":
     main(sys.argv[1:])
